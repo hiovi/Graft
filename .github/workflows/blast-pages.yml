@@ -250,14 +250,46 @@ jobs:
       - name: Remove this PR's page
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          # Read from the event, NOT from `steps.pr` — that step belongs to the
+          # publish job and `steps.*` does not cross jobs. It was empty here, which
+          # turned `git rm -r "pr/$PR_NUMBER"` into `git rm -r "pr/"`: one closed
+          # pull request deleted the page of every open one, and `[ -d "pr/" ]`
+          # waved it through. This job only ever runs on a `closed` event, so the
+          # event always carries the number.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch gh-pages "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages || exit 0
-          cd pages
-          [ -d "pr/$PR_NUMBER" ] || exit 0
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm -r --quiet "pr/$PR_NUMBER"
-          git commit -m "viz: drop PR #$PR_NUMBER" && git push origin gh-pages
+          # Digits, and never the empty string. A path this deletes recursively is
+          # not somewhere to find out at runtime that a variable was unset.
+          case "$PR_NUMBER" in
+            "" | *[!0-9]*)
+              echo "no pull request number in the event: refusing to touch pr/" >&2
+              exit 1
+              ;;
+          esac
+          deleted=""
+          for i in 1 2 3; do
+            rm -rf pages
+            git clone --depth 1 --branch gh-pages "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages || exit 0
+            cd pages
+            # Already gone, or never published: nothing owed.
+            if [ ! -d "pr/$PR_NUMBER" ]; then
+              deleted=1; cd ..; break
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git rm -r --quiet "pr/$PR_NUMBER"
+            git commit -m "viz: drop PR #$PR_NUMBER"
+            # Same race as publishing, same answer — see the publish job.
+            if git push origin gh-pages; then
+              deleted=1; cd ..; break
+            fi
+            cd ..
+            echo "gh-pages push lost a race, retry $i" >&2
+            sleep $((i * 5))
+          done
+          if [ -z "$deleted" ]; then
+            echo "could not drop pr/$PR_NUMBER after 3 attempts" >&2
+            exit 1
+          fi
