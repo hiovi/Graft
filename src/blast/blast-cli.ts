@@ -95,11 +95,16 @@ export async function runBlastCommand(dir: string, opts: BlastCliOptions): Promi
   // After naming, never before: a reviewer's reason cites area LABELS, and the
   // naming pass is what gives an area its final one.
   if (opts.owners !== false) {
-    const { attachOwners, diffAuthors } = await import("./owners.js");
+    const { attachOwners, diffAuthors, localIdentity } = await import("./owners.js");
     // Everyone who wrote a commit in this range, plus whatever the caller named.
     // The range is the reliable half: CI knows the author's login but almost never
     // their commit email, and the email is what git history is keyed on.
-    const authors = opts.base === undefined ? [] : diffAuthors(root, opts.base);
+    //
+    // With no --base there is no range — this is the local "what am I about to
+    // push" case — so the local git identity stands in for it. Without that, the
+    // one person certain to have written the change is the top name in its own
+    // list of who to ask about it.
+    const authors = opts.base === undefined ? localIdentity(root) : diffAuthors(root, opts.base);
     attachOwners(root, report, { exclude: [...authors, ...(opts.prAuthor ?? [])] });
   }
   if (opts.exportViz) await exportRadius(report, contextDir, root, opts.exportViz, opts.title);

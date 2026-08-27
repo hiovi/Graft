@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { attachOwners, githubHandle, ownersFor, sinceLabel } from "../src/blast/owners.js";
+import { attachOwners, diffAuthors, githubHandle, localIdentity, ownersFor, sinceLabel } from "../src/blast/owners.js";
 import type { BlastReport, ChangedArea, ImpactedModule } from "../src/blast/blast.js";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -167,6 +167,26 @@ test("attachOwners fills both sides and ranks changed areas above affected ones"
   // Frankie owns one of each, so their reason cites both labels.
   const frankie = report.reviewers?.find((r) => r.name === FRANKIE.name);
   assert.deepEqual(frankie?.areas.sort(), ["A", "B"]);
+});
+
+test("the two ways an author is kept out of their own suggestions", () => {
+  const root = fixture();
+
+  // CI: every author in the range. `HEAD~2...HEAD` is Frankie's b1 and the bot's
+  // bump, so Frankie is the author of this "PR" and not a reviewer of it.
+  const authors = diffAuthors(root, "HEAD~2");
+  assert.ok(authors.includes(FRANKIE.email), `expected Frankie's email in ${JSON.stringify(authors)}`);
+  const a = ownersFor(root, ["src/a.ts"], { now: NOW, exclude: authors });
+  assert.ok(!a.some((o) => o.name === FRANKIE.name), "an author of the range is not a reviewer of it");
+
+  // Local: no range exists, so the git identity stands in. Without this, `graft
+  // blast` on a dirty tree tells you to tag yourself.
+  git(root, ["config", "user.name", SHRISH.name]);
+  git(root, ["config", "user.email", SHRISH.email]);
+  const me = localIdentity(root);
+  assert.deepEqual(me, [SHRISH.name, SHRISH.email]);
+  const local = ownersFor(root, ["src/a.ts"], { now: NOW, exclude: me });
+  assert.ok(!local.some((o) => o.name === SHRISH.name), "the local identity is not their own reviewer");
 });
 
 test("handle parsing accepts both noreply forms and nothing else", () => {

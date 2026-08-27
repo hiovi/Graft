@@ -238,6 +238,20 @@ export function diffAuthors(root: string, base: string): string[] {
 }
 
 /**
+ * Whoever git would sign a commit as, here and now.
+ *
+ * The local counterpart of {@link diffAuthors}. `graft blast` with no `--base`
+ * compares the working tree against HEAD, so there is no commit range to read
+ * authors from — and without this, the one person guaranteed to have written the
+ * change being examined is also the top name in its own "who to tag" list.
+ */
+export function localIdentity(root: string): string[] {
+  const dir = resolve(root);
+  const out = [git(dir, ["config", "user.name"]), git(dir, ["config", "user.email"])];
+  return out.map((v) => v?.trim() ?? "").filter((v) => v !== "");
+}
+
+/**
  * Fill in `owners` on every area and module, and rank the report's `reviewers`.
  *
  * Called AFTER `--name`, because a reviewer's reason cites area labels and the
