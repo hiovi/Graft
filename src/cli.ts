@@ -732,8 +732,10 @@ program
   .option("--name", "name the affected areas with one cached LLM call (needs GRAFT_API_KEY); without it, areas are named after their hub symbol")
   .option("--export-viz <dir>", "also write the interactive page for this radius (one self-contained index.html — for CI, GitHub Pages, or an artifact)")
   .option("--title <text>", "subtitle beside the repo name on the exported page (e.g. \"PR #171\")")
+  .option("--no-owners", "do not suggest who to tag (by default, git history names the people behind each affected area)")
+  .option("--pr-author <who...>", "GitHub login, git name or email of the PR author, so they are left out of their own suggestions")
   .option(...NO_REFRESH_FLAG)
-  .action(async (dirArg: string | undefined, opts: { base?: string; depth?: string; format?: string; name?: boolean; exportViz?: string; title?: string; refresh?: boolean }) => {
+  .action(async (dirArg: string | undefined, opts: { base?: string; depth?: string; format?: string; name?: boolean; exportViz?: string; title?: string; owners?: boolean; prAuthor?: string[]; refresh?: boolean }) => {
     const dir = noteQuery(queryRoot(dirArg));
     await refreshBefore(dir, opts);
     const { runBlastCommand } = await import("./blast/blast-cli.js");
@@ -744,6 +746,8 @@ program
       name: opts.name,
       exportViz: opts.exportViz,
       title: opts.title,
+      owners: opts.owners,
+      prAuthor: opts.prAuthor,
       globalDir: program.opts<GlobalOpts>().dir,
     });
   });
