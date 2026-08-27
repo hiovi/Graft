@@ -141,7 +141,10 @@ runs:
         set -euo pipefail
         # An ARRAY, not a string: a value here can contain a space (a git display
         # name does), and word-splitting an interpolated string is the same class of
-        # bug as interpolating `${{ }}` into shell text. Nothing is ever `eval`ed.
+        # bug as interpolating a workflow expression into shell text. Nothing is
+        # ever `eval`ed. Note that a literal GitHub expression cannot appear even in
+        # a comment in this block — the template engine evaluates `run:` before bash
+        # ever sees it, and an empty one fails the whole action to load.
         args=(blast . --base "$BASE" --depth "$DEPTH")
         # --name never fails the step: with no key, a spent quota or a refused call
         # it prints one line on stderr and every area keeps its hub-symbol name.
