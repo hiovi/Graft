@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`graft check` no longer reports every container-tier node as `removed`.**
+  `checkGraph` branched on the depth and breadth tiers but never on the container
+  tier the build uses for `.vue`, so `genericLangOf` returned null, a `generic!`
+  assertion threw, and the catch swallowed it as a parse failure — every `.vue`
+  node fell through to `removed` on a clean build, and the `graft build` the
+  check told you to run had already written them. The check now mirrors the
+  build's three-way branch, warms the container grammars alongside the generic
+  ones, and treats "no tier claims this file" as an explicit case rather than a
+  non-null assertion, so the next tier added fails in the type checker instead of
+  silently reporting drift. ([#236](https://github.com/trailhq/Graft/issues/236))
+
 ### Added
 
 - **`graft blast` suggests who to tag.** The comment already named the areas a
