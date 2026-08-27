@@ -28,10 +28,11 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { HOSTS } from './registry.js';
 import { START, END } from './sections.js';
-import { mcpTargets } from './mcp-config.js';
+import { mcpTargets, stripTomlSection } from './mcp-config.js';
 import { hookTargets } from './codex-hooks.js';
 import { antigravitySkillTargets } from './antigravity.js';
 import { claudeTargets } from '../claude/init.js';
+import { isGraftAllowEntry, isGraftFooterRegex } from '../claude/settings-merge.js';
 import type { WriteScope } from './plan.js';
 
 /** What a retraction did to one target. */
@@ -193,24 +194,13 @@ function removeJsonKey(path: string, topKey: string, apply: boolean): RetractAct
  */
 function removeTomlSection(path: string, apply: boolean): RetractAction {
   if (!existsSync(path)) return 'absent';
-  const text = readFileSync(path, 'utf8');
-  const lines = text.split('\n');
-  const start = lines.findIndex((l) => l.trim() === '[mcp_servers.graft]');
-  if (start === -1) return 'absent';
-  let end = start + 1;
-  while (end < lines.length && !lines[end].trimStart().startsWith('[')) end++;
-  const kept = [...lines.slice(0, start), ...lines.slice(end)]
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/^\n+/, '');
+  const { rest: kept, found } = stripTomlSection(readFileSync(path, 'utf8'));
+  if (!found) return 'absent';
   if (!apply) return isBlank(kept) ? 'deleted' : 'removed';
   if (isBlank(kept)) return removeFile(path, true);
   writeFileSync(path, kept.endsWith('\n') ? kept : `${kept}\n`);
   return 'removed';
 }
-
-/** Every graft-authored fragment inside `.claude/settings.json`. */
-const SETTINGS_ALLOW_RE = /^Bash\((graft|npx graft|graft-dev|node dist\/cli\.js)[:)]/;
 
 /**
  * Remove graft's fragments from `.claude/settings.json`, keeping the user's.
@@ -248,13 +238,13 @@ function stripClaudeSettings(path: string, apply: boolean): RetractAction {
   }
 
   if (Array.isArray(root.footerLinksRegexes)) {
-    const kept = root.footerLinksRegexes.filter((r: unknown) => !String(r).includes('graft/'));
+    const kept = root.footerLinksRegexes.filter((r: unknown) => !isGraftFooterRegex(r));
     if (kept.length === 0) delete root.footerLinksRegexes;
     else root.footerLinksRegexes = kept;
   }
 
   if (root.permissions && Array.isArray(root.permissions.allow)) {
-    const kept = root.permissions.allow.filter((a: unknown) => !SETTINGS_ALLOW_RE.test(String(a)));
+    const kept = root.permissions.allow.filter((a: unknown) => !isGraftAllowEntry(a));
     if (kept.length === 0) delete root.permissions.allow;
     else root.permissions.allow = kept;
     if (Object.keys(root.permissions).length === 0) delete root.permissions;
@@ -359,12 +349,39 @@ function targets(repo: string, opts: RetractOpts): Target[] {
   const exclude = new Set(opts.exclude ?? []);
   const out: Target[] = [];
 
+  /**
+   * Paths a *kept* host also writes, which must survive even though some other,
+   * unselected host names them too.
+   *
+   * Three hosts share `AGENTS.md` (agents, hermes, antigravity). Excluding by host
+   * id alone would strip that shared block on behalf of a host nobody selected,
+   * and the only reason the end state came out right was that `init` happened to
+   * rewrite it immediately afterwards. Exclude by path as well, so retraction
+   * never depends on what runs next.
+   */
+  const keptPaths = new Set<string>();
+  for (const host of HOSTS) {
+    if (exclude.has(host.id)) keptPaths.add(join(repo, host.relPath));
+  }
+  for (const t of mcpTargets(repo, [...exclude], { home })) keptPaths.add(t.path);
+  if (exclude.has('claude')) for (const t of claudeTargets(repo)) keptPaths.add(t.path);
+  if (exclude.has('agents')) for (const t of hookTargets(home)) keptPaths.add(t.path);
+  if (exclude.has('antigravity')) for (const t of antigravitySkillTargets(home)) keptPaths.add(t.path);
+
+  /** Queue a target unless a kept host owns that path, or it's already queued. */
+  const seen = new Set<string>();
+  const add = (t: Target): void => {
+    if (keptPaths.has(t.path) || seen.has(t.path)) return;
+    seen.add(t.path);
+    out.push(t);
+  };
+
   // 1. Instruction files, one per host. Owned files go wholesale; shared files
   //    lose only their fenced block.
   for (const host of HOSTS) {
     if (exclude.has(host.id)) continue;
     const path = join(repo, host.relPath);
-    out.push(
+    add(
       host.kind === 'owned'
         ? { hostId: host.id, path, what: 'graft-owned instruction file', scope: 'repo', run: (a) => removeFile(path, a) }
         : { hostId: host.id, path, what: 'fenced graft section', scope: 'repo', run: (a) => stripSection(path, a) },
@@ -374,7 +391,7 @@ function targets(repo: string, opts: RetractOpts): Target[] {
   // 1b. Instruction files from hosts that no longer exist in the registry.
   for (const legacy of LEGACY_TARGETS) {
     const path = join(repo, legacy.relPath);
-    out.push({
+    add({
       hostId: 'legacy', path, what: legacy.what, scope: 'repo',
       run: (a) => (legacy.kind === 'owned' ? removeFile(path, a) : stripSection(path, a)),
     });
@@ -385,7 +402,7 @@ function targets(repo: string, opts: RetractOpts): Target[] {
   const allIds = HOSTS.map((h) => h.id).filter((id) => !exclude.has(id));
   for (const t of mcpTargets(repo, allIds, { home })) {
     if (opts.global === false && t.scope === 'global') continue;
-    out.push({
+    add({
       hostId: t.hostId, path: t.path, what: t.what, scope: t.scope,
       run: (a) => (t.format === 'toml' ? removeTomlSection(t.path, a) : removeJsonKey(t.path, t.topKey!, a)),
     });
@@ -394,20 +411,20 @@ function targets(repo: string, opts: RetractOpts): Target[] {
   // 3. Claude Code: settings fragments, both shims, the skill, and the .mcp.json key.
   if (!exclude.has('claude')) {
     const [settings, statusline, hooks, skill, mcp] = claudeTargets(repo).map((t) => t.path);
-    out.push(
+    for (const t of [
       { hostId: 'claude', path: settings, what: 'statusline + hooks + allowlist + footer regex', scope: 'repo', run: (a) => stripClaudeSettings(settings, a) },
       { hostId: 'claude', path: statusline, what: 'statusline shim', scope: 'repo', run: (a) => removeFile(statusline, a) },
       { hostId: 'claude', path: hooks, what: 'hooks shim', scope: 'repo', run: (a) => removeFile(hooks, a) },
       { hostId: 'claude', path: skill, what: 'graft skill', scope: 'repo', run: (a) => removeFile(skill, a) },
       { hostId: 'claude', path: mcp, what: 'mcpServers.graft', scope: 'repo', run: (a) => removeJsonKey(mcp, 'mcpServers', a) },
-    );
+    ] as Target[]) add(t);
   }
 
   // 4. Global: Codex's hook shim + entries, and Antigravity's shared skill.
   if (opts.global !== false) {
     if (!exclude.has('agents')) {
       for (const t of hookTargets(home)) {
-        out.push({
+        add({
           hostId: t.hostId, path: t.path, what: t.what, scope: 'global',
           run: (a) => (t.path.endsWith('.json') ? stripCodexHooks(t.path, a) : removeFile(t.path, a)),
         });
@@ -415,7 +432,7 @@ function targets(repo: string, opts: RetractOpts): Target[] {
     }
     if (!exclude.has('antigravity')) {
       for (const t of antigravitySkillTargets(home)) {
-        out.push({ hostId: t.hostId, path: t.path, what: t.what, scope: 'global', run: (a) => removeFile(t.path, a) });
+        add({ hostId: t.hostId, path: t.path, what: t.what, scope: 'global', run: (a) => removeFile(t.path, a) });
       }
     }
   }
@@ -426,11 +443,11 @@ function targets(repo: string, opts: RetractOpts): Target[] {
     const cache = join(repo, 'graft');
     const gitignore = join(repo, '.gitignore');
     const ignore = join(repo, '.ignore');
-    out.push(
+    for (const t of [
       { hostId: 'graph', path: cache, what: 'local graph cache', scope: 'repo', run: (a) => removeDir(cache, a) },
       { hostId: 'graph', path: gitignore, what: 'graft/ ignore entry', scope: 'repo', run: (a) => stripIgnoreEntries(gitignore, [/^\/?graft\/?$/], a) },
       { hostId: 'graph', path: ignore, what: 'graft/ search re-admit entries', scope: 'repo', run: (a) => stripIgnoreEntries(ignore, [/^!?graft\/?$/, /^graft\/\.(cache|graph)\/?$/], a) },
-    );
+    ] as Target[]) add(t);
   }
 
   return out;

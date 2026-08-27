@@ -11,6 +11,8 @@ import { join, dirname } from 'node:path';
 import { planRetract, runRetract, changed } from '../src/hosts/retract.js';
 import { runInit } from '../src/claude/init.js';
 import { runHostsInit } from '../src/hosts/init.js';
+import { registerMcpConfigs } from '../src/hosts/mcp-config.js';
+import { mergeGraftSettings } from '../src/claude/settings-merge.js';
 
 function fresh(): string {
   return mkdtempSync(join(tmpdir(), 'graft-retract-'));
@@ -270,4 +272,66 @@ test('emptied directories are pruned, not left hollow', () => {
   runRetract(d, { apply: true, global: false });
   assert.ok(!existsSync(join(d, '.claude', 'skills', 'graft')), 'graft/ skill dir pruned');
   assert.ok(!existsSync(join(d, '.claude', 'skills')), 'now-empty skills/ pruned too');
+});
+
+// --------------------------------------------------------------------------
+// the two append-only writers, now converging
+// --------------------------------------------------------------------------
+
+test('a stale [mcp_servers.graft] is replaced, not skipped', () => {
+  const d = fresh();
+  const cfg = write(d, join('.grok', 'config.toml'),
+    '[mcp_servers.keepme]\ncommand = "y"\n\n[mcp_servers.graft]\ncommand = "OLD-BINARY"\nargs = ["stale"]\n');
+  const [w] = registerMcpConfigs(d, ['grok'], { home: d });
+
+  assert.equal(w.action, 'updated', 'an existing section used to freeze the launch command');
+  const text = readFileSync(cfg, 'utf8');
+  assert.ok(!text.includes('OLD-BINARY'), 'stale command gone');
+  assert.ok(text.includes('[mcp_servers.keepme]'), 'foreign table preserved');
+  assert.equal((text.match(/\[mcp_servers\.graft\]/g) ?? []).length, 1, 'exactly one graft section');
+
+  // Second run is a no-op, not a churn.
+  assert.equal(registerMcpConfigs(d, ['grok'], { home: d })[0].action, 'unchanged');
+  assert.equal(readFileSync(cfg, 'utf8'), text, 'byte-identical on re-run');
+});
+
+test('a renamed allowlist entry is dropped; the user\'s own rules stay', () => {
+  const { merged } = mergeGraftSettings({
+    permissions: { allow: ['Bash(graft-dev:*)', 'Bash(ls:*)', 'Bash(graft-mytool:*)'] },
+  });
+  const allow: string[] = merged.permissions.allow;
+  assert.ok(allow.includes('Bash(ls:*)'), 'unrelated rule kept');
+  assert.ok(allow.includes('Bash(graft-mytool:*)'), 'the user\'s own graft-prefixed rule kept');
+  assert.equal(allow.filter((a) => a === 'Bash(graft-dev:*)').length, 1, 'no duplicate of graft\'s own entry');
+});
+
+test('a superseded footer regex is replaced rather than stacked', () => {
+  const { merged } = mergeGraftSettings({
+    footerLinksRegexes: ['graft/OLD-PATTERN\\.md', 'docs/.*'],
+  });
+  assert.ok(!merged.footerLinksRegexes.includes('graft/OLD-PATTERN\\.md'), 'old graft pattern gone');
+  assert.ok(merged.footerLinksRegexes.includes('docs/.*'), 'user pattern kept');
+  assert.equal(merged.footerLinksRegexes.filter((r: string) => r.startsWith('graft/')).length, 1);
+});
+
+test('mergeGraftSettings stays idempotent over repeated runs', () => {
+  const once = mergeGraftSettings({}).merged;
+  const twice = mergeGraftSettings(structuredClone(once)).merged;
+  assert.deepEqual(twice, once, 'a re-init must not grow the file');
+});
+
+test('a shared AGENTS.md is spared when any host that writes it is kept', () => {
+  const d = fresh();
+  // Three registry hosts name AGENTS.md: agents, hermes, antigravity.
+  const agents = write(d, 'AGENTS.md', `# Notes\n\n${BLOCK}\n`);
+  runRetract(d, { apply: true, global: false, exclude: ['agents'] });
+  assert.ok(readFileSync(agents, 'utf8').includes('graft:start'),
+    'hermes/antigravity must not strip the block that the kept `agents` host owns');
+});
+
+test('hosts sharing one path produce a single retraction, not one each', () => {
+  const d = fresh();
+  const agents = write(d, 'AGENTS.md', `# Notes\n\n${BLOCK}\n`);
+  const rs = runRetract(d, { global: false }).filter((r) => r.path === agents);
+  assert.equal(rs.length, 1, `AGENTS.md should be queued once, got ${rs.length}`);
 });

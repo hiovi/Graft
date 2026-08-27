@@ -20,7 +20,24 @@
 
   The target list is derived from the same registries `init` writes through, so a
   host added later is retractable for free; only a host *removed* from the registry
-  needs a hand-written entry, and `LEGACY_TARGETS` says so.
+  needs a hand-written entry, and `LEGACY_TARGETS` says so. Exclusion is by path as
+  well as by host id: three hosts write `AGENTS.md`, and keeping any one of them has
+  to spare that block.
+
+### Fixed
+
+- **A stale `[mcp_servers.graft]` is now replaced instead of skipped.** The TOML
+  writer returned early the moment the header existed, which froze the launch
+  command at whatever the first `init` wrote — a repo wired when graft wasn't on
+  `PATH` kept the slow `npx` form forever, and no upgrade could correct it. Codex
+  and Grok both went through that path. Foreign tables are untouched either way.
+
+- **`.claude/settings.json` no longer accumulates graft's own entries.** The
+  allowlist and `footerLinksRegexes` were append-only, so a renamed invocation form
+  stayed in the user's settings beside its replacement with nothing able to remove
+  it. Both now drop graft's prior entries before adding the current set, the same
+  way the hooks merge already did. Scoped to the forms graft is actually invoked as,
+  so a hand-written `Bash(graft-mytool:*)` survives.
 
 - **`graft blast` suggests who to tag.** The comment already named the areas a
   diff changes and the areas it can affect; it now names the people behind them,
