@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`graft blast` suggests who to tag.** The comment already named the areas a
+  diff changes and the areas it can affect; it now names the people behind them,
+  read from git history with no API call and no config file. One `git log` per
+  area over that area's own files, weighted towards recent work (120-day
+  half-life), with areas the diff only *reaches* counted at 0.6 against a changed
+  area's 1.0 — the person whose code your change can break is exactly the
+  reviewer the diff alone would never surface. The markdown report gains a `Tag:`
+  line under the tests line and a collapsed `Who knows this code` table; the
+  exported page gains initials badges on each bubble, a *Who knows this* block in
+  the detail panel, and a `people` legend toggle.
+
+  A handle is never guessed: only a GitHub noreply commit address resolves to
+  `@mention`, and anyone else is printed as a plain unlinked name, because a
+  guessed mention pings a stranger. A repo can fix that for good with a
+  `.mailmap` entry, which git applies to the names `blast` reads. Merge commits,
+  bots, everyone who authored a commit in the diff range, and — for a local run
+  with no `--base` — your own git identity are all excluded. `--no-owners` turns
+  the layer off; `--pr-author <who...>` takes logins, names or emails; the
+  bundled action gains a `suggest-reviewers` input, defaulting true.
+
 ## 0.13.0
 
 ### Added
