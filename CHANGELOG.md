@@ -4,6 +4,24 @@
 
 ### Added
 
+- **`graft init` converges instead of accumulating, and `graft uninstall` removes
+  graft entirely.** `init` wrote the files the selected agents needed and never
+  looked at the rest, so a repo wired by an older version — or by the same version
+  with different `--agents` — kept that run's files forever, and the session-start
+  refresh then kept them *up to date*. `init` now retracts every agent it isn't
+  about to write, and `graft uninstall` retracts the lot.
+
+  Only graft's own contribution is touched: inside a shared file just the
+  marker-fenced block, inside a config just the `graft` key — foreign MCP servers,
+  hooks, statuslines and ignore entries survive byte for byte. A file left holding
+  nothing is deleted rather than truncated to an empty shell, and the directories
+  that empties are pruned. An unparseable config is reported and left alone.
+  `uninstall` is dry-run until `-y`.
+
+  The target list is derived from the same registries `init` writes through, so a
+  host added later is retractable for free; only a host *removed* from the registry
+  needs a hand-written entry, and `LEGACY_TARGETS` says so.
+
 - **`graft blast` suggests who to tag.** The comment already named the areas a
   diff changes and the areas it can affect; it now names the people behind them,
   read from git history with no API call and no config file. One `git log` per

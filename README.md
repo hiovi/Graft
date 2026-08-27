@@ -382,6 +382,11 @@ graft init --no-build                # wire the files only; don't build the grap
 graft init --all-agents              # wire every known agent, detected or not
 graft init --list-agents             # list known agent ids and exit
 
+graft uninstall [dir]                # remove every file and config entry graft wrote here (the inverse of init)
+graft uninstall -y                   # actually remove (without -y it prints what it would remove and exits)
+graft uninstall --keep-cache         # wiring only; leave graft/ and the .gitignore entry
+graft uninstall --no-global          # leave out-of-repo files alone (~/.codex, ~/.gemini)
+
 graft version                        # print the installed + latest published npm version
 graft upgrade                        # npm install -g the latest published version
                                      # a new version is announced automatically (checked once a day);
