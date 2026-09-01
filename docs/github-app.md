@@ -15,7 +15,10 @@ instead of a workflow file per repo.
 
 1. Verifies the webhook signature, queues the job, answers `202` — GitHub gives
    up on a delivery after ten seconds and a review takes longer.
-2. Fetches `refs/pull/<n>/merge` and the base branch, shallow.
+2. Fetches `refs/pull/<n>/merge` and the base branch, shallow — falling back to
+   `refs/pull/<n>/head` for a closed or merged pull request, whose merge ref
+   GitHub has deleted. The head ref is then diffed against the base branch as it
+   stood at the merge, so the radius is still the pull request's own change.
 3. Builds the structural graph, computes the radius, renders the comment.
 4. Stores the viewer page and links it with a signed URL.
 5. Edits its existing comment rather than adding one per push.
