@@ -9,13 +9,20 @@
  * GitHub retries a delivery it considers failed and gives up after ten seconds,
  * while a review takes tens of them — so the handler validates, queues, and
  * answers 202. Everything real happens on the queue.
+ *
+ * "On the queue" used to mean "on this event loop", and that was the whole of a
+ * multi-minute outage: a review is synchronous end to end, so one in flight left
+ * this server unable to answer /healthz or serve a page it had already produced.
+ * The queue now runs each review in its own process (`./review-process.ts`) and
+ * everything in here is I/O again.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { jobKey, reviewJobFor, type ReviewJob } from "./events.js";
 import { InstallationTokens, verifySignature, type AppCredentials, type Fetch } from "./identity.js";
 import { PageStore } from "./pages.js";
 import { WorkQueue } from "./queue.js";
-import { reviewPullRequest } from "./review.js";
+import { reviewInChildProcess } from "./review-process.js";
+import type { reviewPullRequest } from "./review.js";
 
 /** A webhook body larger than this is not a pull_request event we can use. */
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -23,7 +30,8 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 /** Seams for tests: nothing here has a default that touches the network. */
 export interface AppSeams {
   fetch?: Fetch;
-  /** Swapped out to assert what the queue was handed, without a clone. */
+  /** Swapped out to assert what the queue was handed, without a clone — and, being
+   * called in-process, without the fork the default reviewer does. */
   review?: typeof reviewPullRequest;
   now?: () => number;
 }
@@ -46,7 +54,7 @@ export function createApp(
 ): { server: Server; queue: WorkQueue<ReviewJob>; pages: PageStore } {
   const log = config.log ?? ((msg: string) => console.log(msg));
   const fetchImpl = seams.fetch ?? (globalThis.fetch as unknown as Fetch);
-  const review = seams.review ?? reviewPullRequest;
+  const review = seams.review ?? reviewInChildProcess;
   const tokens = new InstallationTokens(config, fetchImpl, seams.now ?? Date.now, config.api);
   const pages = new PageStore({ secret: config.webhookSecret, dir: config.pageDir });
   const origin = config.publicUrl.replace(/\/$/, "");
