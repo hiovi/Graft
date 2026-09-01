@@ -27,6 +27,7 @@ import { claudeGlobalTargets, globalHelpersDir, installClaudeGlobal } from '../s
 import { runInit } from '../src/claude/init.js';
 import { planRetract, runRetract } from '../src/hosts/retract.js';
 import { planInit } from '../src/hosts/plan.js';
+import { toPosixPath } from '../src/util/paths.js';
 import { tmpRepo } from './helpers.js';
 
 /**
@@ -111,7 +112,8 @@ test('the user-level hook commands name the shim absolutely, not via CLAUDE_PROJ
   // The repo form would resolve inside whatever project is open — precisely the
   // project that has no shim, which is the case this install exists to cover.
   assert.ok(!cmd.includes('CLAUDE_PROJECT_DIR'), `absolute, got: ${cmd}`);
-  assert.ok(cmd.includes(shimOf(home)), `names the user-level shim, got: ${cmd}`);
+  // Posix form: the command uses one separator throughout, on every platform.
+  assert.ok(cmd.includes(toPosixPath(shimOf(home))), `names the user-level shim, got: ${cmd}`);
 });
 
 /* ------------------------------------------------------------------ *

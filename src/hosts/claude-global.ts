@@ -30,6 +30,7 @@ import { dirname, join } from 'node:path';
 import { hooksShim } from '../claude/shim-template.js';
 import { claudeDistDir } from '../claude/paths.js';
 import { mergeGraftHooks } from '../claude/settings-merge.js';
+import { toPosixPath } from '../util/paths.js';
 import { readJsonObject, writeOwned, type ConfigWrite } from './config-write.js';
 import { mergeJsonKey, serverEntry } from './mcp-config.js';
 import type { PlannedWrite } from './plan.js';
@@ -104,7 +105,11 @@ export function installClaudeGlobal(home: string): GlobalWrite[] {
   // worse failure than not installing.
   if (out[0].action !== 'skipped-unparseable') {
     try {
-      out.push(upsertGlobalHooks(settings.id, settings.path, globalHelpersDir(home)));
+      // Posix form in the command string: `join` gives backslashes on Windows and
+      // the template appends `/graft-hooks.cjs`, so the raw path produces a mixed
+      // `C:\Users\…\helpers/graft-hooks.cjs`. Node accepts forward slashes on
+      // Windows, so one separator throughout is both correct and readable.
+      out.push(upsertGlobalHooks(settings.id, settings.path, toPosixPath(globalHelpersDir(home))));
     } catch {
       out.push({ id: settings.id, path: settings.path, action: 'skipped-unparseable' });
     }
