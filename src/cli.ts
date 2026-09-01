@@ -1062,7 +1062,10 @@ function wireTarget(
     for (const r of retracted) console.error(`- removed ${r.path} (${r.what}) — agent not selected`);
 
     if (wantClaude) {
-      const res = runInit(repo, { build: opts.build, cliPath, statusline: wantStatusline });
+      // `global`/`home` are threaded through alongside `statusline`: the claude layer
+      // writes under `~/.claude` now (hosts/claude-global.ts), so --no-global has to
+      // reach it or the flag would silently mean "no out-of-repo writes, except three".
+      const res = runInit(repo, { build: opts.build, cliPath, statusline: wantStatusline, global: opts.global, home });
       console.error(`✓ wrote ${res.settingsPath}`);
       for (const s of res.shims) console.error(`✓ wrote ${s}`);
       console.error(`✓ wrote ${res.skill}`);

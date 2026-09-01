@@ -31,6 +31,7 @@ import { START, END } from './sections.js';
 import { mcpTargets, stripTomlSection } from './mcp-config.js';
 import { hookTargets } from './codex-hooks.js';
 import { antigravitySkillTargets } from './antigravity.js';
+import { claudeGlobalTargets } from './claude-global.js';
 import { claudeTargets } from '../claude/init.js';
 import { isGraftAllowEntry, isGraftFooterRegex } from '../claude/settings-merge.js';
 import type { WriteScope } from './plan.js';
@@ -364,7 +365,10 @@ function targets(repo: string, opts: RetractOpts): Target[] {
     if (exclude.has(host.id)) keptPaths.add(join(repo, host.relPath));
   }
   for (const t of mcpTargets(repo, [...exclude], { home })) keptPaths.add(t.path);
-  if (exclude.has('claude')) for (const t of claudeTargets(repo)) keptPaths.add(t.path);
+  if (exclude.has('claude')) {
+    for (const t of claudeTargets(repo)) keptPaths.add(t.path);
+    for (const t of claudeGlobalTargets(home)) keptPaths.add(t.path);
+  }
   if (exclude.has('agents')) for (const t of hookTargets(home)) keptPaths.add(t.path);
   if (exclude.has('antigravity')) for (const t of antigravitySkillTargets(home)) keptPaths.add(t.path);
 
@@ -420,8 +424,17 @@ function targets(repo: string, opts: RetractOpts): Target[] {
     ] as Target[]) add(t);
   }
 
-  // 4. Global: Codex's hook shim + entries, and Antigravity's shared skill.
+  // 4. Global: Claude Code's user-level copy, Codex's hook shim + entries, and
+  //    Antigravity's shared skill.
   if (opts.global !== false) {
+    if (!exclude.has('claude')) {
+      const [shim, settings, mcp] = claudeGlobalTargets(home);
+      for (const t of [
+        { hostId: 'claude', path: shim.path, what: shim.what, scope: 'global', run: (a) => removeFile(shim.path, a) },
+        { hostId: 'claude', path: settings.path, what: settings.what, scope: 'global', run: (a) => stripClaudeSettings(settings.path, a) },
+        { hostId: 'claude', path: mcp.path, what: mcp.what, scope: 'global', run: (a) => removeJsonKey(mcp.path, 'mcpServers', a) },
+      ] as Target[]) add(t);
+    }
     if (!exclude.has('agents')) {
       for (const t of hookTargets(home)) {
         add({
