@@ -54,6 +54,7 @@ docker run -p 3000:3000 \
   -e GRAFT_APP_PRIVATE_KEY="$(cat graft.private-key.pem)" \
   -e GRAFT_WEBHOOK_SECRET=... \
   -e GRAFT_PUBLIC_URL=https://graft.example.com \
+  -v graft-pages:/var/lib/graft/pages \
   graft-app
 ```
 
@@ -64,6 +65,16 @@ because it is what the comment's link is built from.
 
 The process refuses to start if any of those four are missing: a server that
 boots without a webhook secret looks healthy and silently rejects every delivery.
+
+The volume is the fifth thing and it is optional — but without it, every link
+already posted to a pull request breaks the first time the container is replaced.
+The token in a link is derived from the page id rather than stored, so the link
+keeps verifying and simply 404s, with nothing in the comment to say why. The image
+already points `GRAFT_PAGE_DIR` at `/var/lib/graft/pages` (500 pages of ~50 kB,
+so ~25 MB is the ceiling); mount anything durable there and the pages come back
+with the process. Set the variable yourself on hosts that are not this image, or
+leave it empty to keep the store in memory — it is deliberately not required, as
+a server that refuses to boot reviews nothing at all.
 
 ### 3. Install it on a repository
 

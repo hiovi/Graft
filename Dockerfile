@@ -44,10 +44,19 @@ COPY --from=build /app/dist ./dist
 # --ignore-scripts stops `prepare` from trying to rebuild without tsc.
 RUN npm prune --omit=dev --ignore-scripts && npm cache clean --force
 
+# The page store's directory exists in the image, owned by node, for one reason:
+# Docker initialises a fresh named volume from the mountpoint it covers, so a
+# `-v graft-pages:/var/lib/graft/pages` over a path that did NOT exist arrives
+# root-owned and the App silently cannot write to it. Unmounted this is still
+# worth having — `docker restart` keeps the container's filesystem, so the links
+# already posted to pull requests survive that much on their own.
+RUN mkdir -p /var/lib/graft/pages && chown node:node /var/lib/graft/pages
+
 # Never root: this process handles untrusted source and has no reason to be able
 # to write outside its own tree.
 USER node
 ENV PORT=3000
+ENV GRAFT_PAGE_DIR=/var/lib/graft/pages
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

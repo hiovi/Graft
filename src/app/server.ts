@@ -32,6 +32,8 @@ export interface AppConfig extends AppCredentials {
   webhookSecret: string;
   /** Public origin, for the links put in comments, e.g. https://graft.example.com */
   publicUrl: string;
+  /** Where pages are kept, so a restart does not strand the links already posted. */
+  pageDir?: string;
   port?: number;
   concurrency?: number;
   api?: string;
@@ -46,7 +48,7 @@ export function createApp(
   const fetchImpl = seams.fetch ?? (globalThis.fetch as unknown as Fetch);
   const review = seams.review ?? reviewPullRequest;
   const tokens = new InstallationTokens(config, fetchImpl, seams.now ?? Date.now, config.api);
-  const pages = new PageStore({ secret: config.webhookSecret });
+  const pages = new PageStore({ secret: config.webhookSecret, dir: config.pageDir });
   const origin = config.publicUrl.replace(/\/$/, "");
 
   const queue = new WorkQueue<ReviewJob>(

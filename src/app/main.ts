@@ -40,6 +40,12 @@ const { server, queue } = createApp({
   publicUrl: required("GRAFT_PUBLIC_URL"),
   port,
   concurrency: Number(process.env.GRAFT_CONCURRENCY ?? 2),
+  // Optional, unlike the four above, and deliberately so: point it at a mounted
+  // volume and the pages already linked from pull requests survive a restart;
+  // leave it unset and they do not. Neither is worth refusing to boot over — a
+  // server that will not start reviews nothing at all, which is strictly worse
+  // than one whose old links go stale.
+  pageDir: process.env.GRAFT_PAGE_DIR,
 });
 
 /**
