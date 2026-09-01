@@ -7,6 +7,7 @@ import { underGraft, main, lastFileScopeHint, promptAskTimeout } from '../src/cl
 import { readStats, readSession } from '../src/claude/state.js';
 import { runSync } from '../src/claude/sync-run.js';
 import { savingsLine } from '../src/context/savings.js';
+import { CI_ENV_VARS } from '../src/telemetry/gate.js';
 import { writeStats, emptyStats, acquireLock, resolveContextDir } from '../src/claude/state.js';
 
 test('underGraft detects edits inside graft/', () => {
@@ -551,21 +552,24 @@ test('cursor-session-end force-closes THIS conversation even though its file was
 
   // Turn telemetry on against a scratch $HOME so the rollup actually queues (and
   // marks the file), the observable proof the force-close ran — not just no-throw.
-  const saved = {
-    HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE,
-    KEY: process.env.GRAFT_POSTHOG_KEY, CI: process.env.CI, DNT: process.env.DO_NOT_TRACK,
-  };
+  //
+  // EVERY CI variable has to go, not just `CI`: `inCi` is deliberately generous and
+  // also reads GITHUB_ACTIONS, GITLAB_CI and six more. Clearing `CI` alone passed on
+  // a laptop and failed on GitHub Actions, where GITHUB_ACTIONS is set — so the list
+  // comes from `CI_ENV_VARS` rather than being copied here, and cannot drift from it.
+  const scrubbed = ['HOME', 'USERPROFILE', 'GRAFT_POSTHOG_KEY', 'DO_NOT_TRACK', ...CI_ENV_VARS];
+  const saved = Object.fromEntries(scrubbed.map((k) => [k, process.env[k]]));
+  for (const k of [...CI_ENV_VARS, 'DO_NOT_TRACK']) delete process.env[k];
   process.env.HOME = home; process.env.USERPROFILE = home;
   process.env.GRAFT_POSTHOG_KEY = 'phc_test_key';
-  delete process.env.CI; delete process.env.DO_NOT_TRACK;
   process.env.CLAUDE_PROJECT_DIR = d;
   try {
     await runWithStdin(JSON.stringify({ conversation_id: 'c1' }), () => main('cursor-session-end'));
     assert.equal(readSession(d, 'c1').summarized, true, 'the just-ended conversation was rolled up');
   } finally {
     delete process.env.CLAUDE_PROJECT_DIR;
-    for (const [k, v] of Object.entries({ HOME: saved.HOME, USERPROFILE: saved.USERPROFILE, GRAFT_POSTHOG_KEY: saved.KEY, CI: saved.CI, DO_NOT_TRACK: saved.DNT }))
-      if (v === undefined) delete (process.env as any)[k]; else (process.env as any)[k] = v;
+    for (const [k, v] of Object.entries(saved))
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
 });
 
