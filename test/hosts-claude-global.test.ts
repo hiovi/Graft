@@ -29,8 +29,25 @@ import { planRetract, runRetract } from '../src/hosts/retract.js';
 import { planInit } from '../src/hosts/plan.js';
 import { tmpRepo } from './helpers.js';
 
+/**
+ * Isolated from the developer's own git config, and carrying an identity of its own:
+ * a CI runner has no `user.email`, and blanking GIT_CONFIG_GLOBAL removes any it did
+ * have, so `git commit` fails without these. Same block as test/graph-seed.test.ts.
+ */
 const git = (d: string, ...args: string[]): void => {
-  execFileSync('git', args, { cwd: d, stdio: 'ignore', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' } });
+  execFileSync('git', args, {
+    cwd: d,
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+      GIT_AUTHOR_NAME: 'graft test',
+      GIT_AUTHOR_EMAIL: 'test@example.invalid',
+      GIT_COMMITTER_NAME: 'graft test',
+      GIT_COMMITTER_EMAIL: 'test@example.invalid',
+    },
+  });
 };
 
 const settingsOf = (home: string): string => join(home, '.claude', 'settings.json');

@@ -95,8 +95,22 @@ test('a fresh worktree advertises every tool, on the strength of its parent', as
   // it gets one from the parent on the first query (graph/seed.ts). Gating on this
   // tree alone would hide graft in exactly the worktree the user came to work in.
   const main = mkdtempSync(join(tmpdir(), 'graft-mcpwtmain-'));
+  // Identity in the env, not the config: a CI runner has none, and blanking
+  // GIT_CONFIG_GLOBAL removes any it had, so `git commit` would fail.
   const git = (...args: string[]): void =>
-    execFileSync('git', args, { cwd: main, stdio: 'ignore', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' } });
+    execFileSync('git', args, {
+      cwd: main,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_AUTHOR_NAME: 'graft test',
+        GIT_AUTHOR_EMAIL: 'test@example.invalid',
+        GIT_COMMITTER_NAME: 'graft test',
+        GIT_COMMITTER_EMAIL: 'test@example.invalid',
+    },
+    });
   git('init', '-b', 'main');
   mkdirSync(join(main, 'src'), { recursive: true });
   writeFileSync(join(main, 'src', 'math.ts'), 'export function add(a: number, b: number) {\n  return a + b;\n}\n');
