@@ -25,6 +25,12 @@ export interface CallHierarchyItem {
   range: LspRange;
   selectionRange: LspRange;
 }
+export interface LspLocation { uri: string; range: LspRange }
+
+/** Which request the enrichment pass drives: outgoing call hierarchy where the server
+ * has it; else the definition of each call the static resolver dropped; else every
+ * reference to a symbol (its callers seen from the callee's side). */
+export type LspProbe = "callHierarchy" | "definition" | "references";
 
 const uriOf = (abs: string): string => pathToFileURL(abs).toString();
 
@@ -34,6 +40,7 @@ export class LspClient {
   private opened = new Set<string>();
   private ready = false;
   private spawnFailed = false;
+  private capabilities: Record<string, unknown> = {};
 
   constructor(
     command: string,
@@ -116,9 +123,17 @@ export class LspClient {
       }).then((r) => { clearTimeout(t); resolve(r); }, () => { clearTimeout(t); resolve(null); });
     });
     if (!init) return false;
+    this.capabilities = (init as { capabilities?: Record<string, unknown> }).capabilities ?? {};
     this.conn.sendNotification("initialized", {});
     this.ready = true;
     return true;
+  }
+
+  /** Does the server advertise a capability (`callHierarchyProvider`, `referencesProvider`, …)?
+   * Read off the initialize result; a server registering it dynamically instead is not
+   * seen, so callers treat a missing flag as "not advertised", never as "absent". */
+  supports(capability: string): boolean {
+    return !!this.capabilities[capability];
   }
 
   /** Open a document (idempotent). Servers resolve cross-file refs from disk, but
@@ -135,18 +150,53 @@ export class LspClient {
     } catch { /* stream closed mid-write */ }
   }
 
-  /** Poll one probe position until call-hierarchy returns something — servers
-   * like rust-analyzer/clangd index AFTER `initialized` and answer empty until
-   * ready. Returns true once ready (or false at the cap). */
-  async waitUntilReady(abs: string, pos: LspPosition, maxMs = 90000): Promise<boolean> {
+  /** Poll one probe position until the request the pass will drive returns something —
+   * servers like rust-analyzer/clangd index AFTER `initialized` and answer empty until
+   * ready. The references probe includes the declaration, so a symbol nobody references
+   * still answers once the server is up. Returns true once ready (or false at the cap). */
+  async waitUntilReady(abs: string, pos: LspPosition, probe: LspProbe = "callHierarchy", maxMs = 90000): Promise<boolean> {
     this.didOpen(abs);
     const deadline = Date.now() + maxMs;
     while (Date.now() < deadline) {
-      const items = await this.prepareCallHierarchy(abs, pos);
-      if (items.length) return true;
+      const ready = probe === "references"
+        ? (await this.references(abs, pos, true)).length > 0
+        : probe === "definition"
+          ? (await this.definition(abs, pos)).length > 0
+          : (await this.prepareCallHierarchy(abs, pos)).length > 0;
+      if (ready) return true;
       await new Promise((r) => setTimeout(r, 2000));
     }
     return false;
+  }
+
+  /** Where the symbol at `pos` is defined — the one request every server answers, and
+   * the instrument for a call the name resolver dropped: the server says which of the
+   * same-named definitions this call actually reaches. Normalises the spec's three
+   * result shapes (Location, Location[], LocationLink[]) to locations. */
+  async definition(abs: string, pos: LspPosition): Promise<LspLocation[]> {
+    if (!this.ready) return [];
+    type Link = { targetUri: string; targetSelectionRange?: LspRange; targetRange: LspRange };
+    const r = await this.call<LspLocation | Array<LspLocation | Link> | null>("textDocument/definition", {
+      textDocument: { uri: uriOf(abs) },
+      position: pos,
+    });
+    if (!r) return [];
+    return (Array.isArray(r) ? r : [r]).map((l) =>
+      "targetUri" in l ? { uri: l.targetUri, range: l.targetSelectionRange ?? l.targetRange } : l,
+    );
+  }
+
+  /** Every location that names the symbol at `pos`. The fallback instrument for a server
+   * without call hierarchy: an in-repo reference from inside another definition is that
+   * definition calling (or at least using) this one. */
+  async references(abs: string, pos: LspPosition, includeDeclaration = false): Promise<LspLocation[]> {
+    if (!this.ready) return [];
+    const r = await this.call<LspLocation[] | null>("textDocument/references", {
+      textDocument: { uri: uriOf(abs) },
+      position: pos,
+      context: { includeDeclaration },
+    });
+    return r ?? [];
   }
 
   async prepareCallHierarchy(abs: string, pos: LspPosition): Promise<CallHierarchyItem[]> {

@@ -96,6 +96,11 @@ export interface ResolveOptions {
    * (`example.com/app/pkg/util`) to the in-repo directory they name, relative to the
    * owning module's `go.mod` location. Empty/absent → Go imports stay external strings. */
   goModules?: GoModule[];
+  /** Sink for the `calls` raw edges this pass drops — an unknown or ambiguous callee
+   * name — that carry a position. The opt-in LSP pass (enrich.ts) asks a language
+   * server for each one's definition, which is precisely the question name
+   * resolution could not answer. Absent → dropped calls are simply dropped. */
+  unresolvedCalls?: RawEdge[];
 }
 
 export function resolveEdges(
@@ -331,6 +336,7 @@ export function resolveEdges(
         hit = resolveName(e.name!, e.file, SWIFT_CTOR_KINDS, perFileName, globalName);
       }
       if (hit) add(e.source, hit.id, "calls", hit.confidence); // drop unresolved calls (too noisy)
+      else if (e.pos) opts.unresolvedCalls?.push(e);
     }
   }
   return out;
