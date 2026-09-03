@@ -23,6 +23,7 @@ import { ensureFreshChildren, ensureFreshGraph, refreshNote } from "./graph/refr
 import { isWorkspaceBuildRoot, readWorkspace } from "./graph/workspace.js";
 import { nearestGraftRoot } from "./graph/root.js";
 import { unsupportedExtensions, supportedExtensions } from "./graph/source-files.js";
+import { loadLanguagePacks } from "./graph/packs.js";
 import { discoverWorkspaceChildren } from "./graph/scopes.js";
 import {
   runWorkspaceAsk,
@@ -899,6 +900,9 @@ program
       return;
     }
     const { buildRepoMap, formatRepoMap } = await import("./graph/map.js");
+    // The header routes each file to a language by extension; a pack's extension
+    // routes nowhere until the repo's packs are loaded in THIS process.
+    loadLanguagePacks(root);
     const contextDir = contextDirFor(root, globalOpts.dir);
     const graph = loadGraphCached(contextDir);
     if (!graph) {

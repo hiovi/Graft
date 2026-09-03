@@ -14,7 +14,9 @@
  * built-in row does — extensions, grammar, tags query, optionally one LSP server row —
  * and is refused, with one stderr line, when it would take a language away from a repo:
  * a name or an extension another tier already owns, a grammar or query file that is
- * not there. Refusal never fails the build; the repo indexes as it did before.
+ * not there. Refusal never fails the build; the repo indexes as it did before. A
+ * home-level pack whose name a repo-level pack already took is not a refusal — that
+ * is the documented precedence — so it is passed over in silence.
  *
  * The manifest:
  *
@@ -96,6 +98,9 @@ export function loadLanguagePacks(
         continue;
       }
       if (registeredDirs.has(dir)) continue; // loaded for another (root, home) pair already
+      // The repo-level directory is scanned first; a home-level pack of a name it took
+      // is the precedence rule working, not a broken pack — no warning.
+      if (base !== packDirs(root, home)[0] && registered.has(readName(dir))) continue;
       const outcome = loadPack(dir);
       if (outcome.ok) {
         registeredDirs.add(dir);
@@ -107,6 +112,16 @@ export function loadLanguagePacks(
     }
   }
   return result;
+}
+
+/** The manifest's `name`, or "" when it cannot be read — precedence only needs the name. */
+function readName(dir: string): string {
+  try {
+    const name = (JSON.parse(readFileSync(join(dir, "pack.json"), "utf8")) as { name?: unknown }).name;
+    return typeof name === "string" ? name : "";
+  } catch {
+    return "";
+  }
 }
 
 type Outcome = { ok: true; name: string } | { ok: false; reason: string };
