@@ -41,6 +41,13 @@ export interface GenericLang {
   wasm: string;
   wasmPath?: string;
   queryPath?: string;
+  /** A file IS a module named by its basename (ReScript, OCaml, Elm): naming a module
+   * (`@reference.module` in the tags query) is a file→file import of `<Name>.<ext>`.
+   * Set by a language pack's `fileModules`. */
+  fileModules?: boolean;
+  /** With `fileModules`: module names that are never a file in any repo (a standard
+   * library), skipped outright rather than left as unresolved import strings. */
+  externalModules?: readonly string[];
 }
 
 /** The breadth registry. Add a row + a queries/<name>.scm to support a language.
@@ -416,14 +423,26 @@ function tagsExtract(
   const defNameAt = new Set<number>();
   const calls: Array<{ name: string; at: number; pos: { line: number; character: number } }> = [];
   const refs: Array<{ name: string; at: number }> = [];
+  // Module-per-file languages: every module the file names, and the modules it defines
+  // itself (a nested `module Inner`, a `module type S`) — those are never imports.
+  const langRow = allLangs().find((l) => l.name === langName);
+  const named: string[] = [];
+  const ownModules = new Set<string>([(rel.split("/").pop() ?? rel).replace(/\.[^.]+$/, "")]);
   for (const m of matches) {
     const cap: Record<string, TsNode> = {};
     for (const c of m.captures) cap[c.name] = c.node;
     const defKey = Object.keys(cap).find((k) => k.startsWith("definition."));
     if (defKey && cap.name) {
       defNameAt.add(cap.name.startIndex);
-      mkDef(cap.name.text, KIND[defKey.slice("definition.".length)] ?? "function", defScope(cap[defKey], langName));
+      const kind = KIND[defKey.slice("definition.".length)] ?? "function";
+      if (kind === "module" || kind === "interface") ownModules.add(cap.name.text);
+      mkDef(cap.name.text, kind, defScope(cap[defKey], langName));
     }
+    // In a module-per-file language a module reference IS the import (below), and only
+    // that: settling it by name against every `module` definition in the repo would turn
+    // `Array.map` into an edge to whichever file declares a nested `module Array`.
+    const fileModuleRef = "reference.module" in cap && !!langRow?.fileModules;
+    if (fileModuleRef && cap.name) named.push(cap.name.text);
     if (("reference.call" in cap || "reference.send" in cap) && cap.name) {
       // web-tree-sitter reports columns in UTF-16 code units, which is what LSP wants.
       const { row, column } = cap.name.startPosition;
@@ -437,7 +456,7 @@ function tagsExtract(
     // (same-file certain, unique cross-file inferred, ambiguous dropped), so a data
     // class that's only ever extended or instantiated stops being an orphan.
     if (("reference.class" in cap || "reference.interface" in cap ||
-         "reference.implementation" in cap || "reference.module" in cap) && cap.name)
+         "reference.implementation" in cap || ("reference.module" in cap && !fileModuleRef)) && cap.name)
       refs.push({ name: cap.name.text, at: cap.name.startIndex });
   }
   // innermost enclosing definition of a token at byte offset `at`
@@ -455,6 +474,20 @@ function tagsExtract(
     const enc = enclosing(r.at);
     if (!enc) continue; // a reference with no enclosing definition has no sound source
     rawEdges.push({ source: enc.id, relation: "references", file: rel, name: r.name });
+  }
+  // A file IS a module, so naming one is the dependency — from the file, wherever in
+  // it the name appears (an `open` at the top has no enclosing definition, and is the
+  // most explicit import there is). One edge per distinct module; the file's own
+  // modules and the language's standard library are not imports. resolve.ts settles
+  // the name to the unique `<Name>.<ext>` and keeps it as a string otherwise.
+  if (langRow?.fileModules) {
+    const external = new Set(langRow.externalModules ?? []);
+    const seen = new Set<string>();
+    for (const name of named) {
+      if (seen.has(name) || ownModules.has(name) || external.has(name)) continue;
+      seen.add(name);
+      rawEdges.push({ source: rel, relation: "imports", specifier: name, file: rel });
+    }
   }
 }
 

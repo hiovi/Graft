@@ -16,7 +16,7 @@ import { posix } from "node:path";
 import { toPosixPath } from "../util/paths.js";
 import type { EdgeV1, Kind, NodeV1, Relation } from "./types.js";
 import { languageOf, type RawEdge } from "./extract.js";
-import { genericLangOf } from "./generic.js";
+import { genericLangOf, type GenericLang } from "./generic.js";
 
 const IMPORT_EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py"];
 /** C/C++ source + header extensions, for resolving `#include` targets. */
@@ -133,6 +133,9 @@ export function resolveEdges(
   // node ids. A `use App\Models\User` names a PSR-4 class whose file mirrors the namespace
   // tail under some (unknown) source root, so the suffix is the portable key.
   const phpFilesBySuffix = new Map<string, string[]>();
+  // Module-per-file languages (a breadth row with `fileModules`): a file's basename IS
+  // its module name, so `Counter` names `src/Counter.res` wherever it sits.
+  const fileModulesByName = new Map<string, NodeV1[]>();
   const hasGoModules = !!opts.goModules?.length;
   for (const n of nodes) {
     if (n.kind === "file") {
@@ -154,6 +157,9 @@ export function resolveEdges(
       if (n.path.endsWith(".php")) {
         const parts = toPosixPath(n.path).split("/");
         for (let i = 0; i < parts.length; i++) push(phpFilesBySuffix, parts.slice(i).join("/"), n.id);
+      }
+      if (genericLangOf(n.path)?.fileModules) {
+        push(fileModulesByName, posix.basename(toPosixPath(n.path)).replace(/\.[^.]+$/, ""), n);
       }
       {
         const p = toPosixPath(n.path);
@@ -210,8 +216,11 @@ export function resolveEdges(
     if (e.relation === "contains" && e.targetId) {
       add(e.source, e.targetId, "contains", "extracted");
     } else if (e.relation === "imports" && e.specifier) {
+      const fileModuleRow = genericLangOf(e.file);
       const target =
-        hasGoModules && e.file.endsWith(".go")
+        fileModuleRow?.fileModules
+          ? resolveFileModule(e.specifier, fileModuleRow, fileModulesByName)
+          : hasGoModules && e.file.endsWith(".go")
           ? resolveGoImport(e.specifier, opts.goModules!, goFilesByDir)
           : e.file.endsWith(".java")
             ? resolveJavaImport(e.specifier, javaFilesBySuffix)
@@ -543,6 +552,26 @@ function resolveJavaImport(spec: string, filesBySuffix: Map<string, string[]>): 
   if (dot > 0) {
     const enclosing = hit(spec.slice(0, dot));
     if (enclosing) return enclosing;
+  }
+  return spec;
+}
+
+/**
+ * Resolve a module name in a module-per-file language to the file that defines it.
+ * Only files of the SAME language count (two packs may both be module-per-file). When
+ * several files share the basename — an implementation and its interface, `.res` and
+ * `.resi` — the row's first-listed extension wins, which is why a pack lists the
+ * implementation extension first. Two implementations of one name (a monorepo with one
+ * `App.res` per app) are ambiguous, and a name that is no file is a dependency or a
+ * namespaced package's module — both stay the raw name rather than a guessed edge.
+ */
+function resolveFileModule(spec: string, row: GenericLang, byName: Map<string, NodeV1[]>): string {
+  const hits = (byName.get(spec) ?? []).filter((n) => genericLangOf(n.path)?.name === row.name);
+  if (hits.length === 1) return hits[0].id;
+  for (const ext of row.exts) {
+    const withExt = hits.filter((n) => n.path.toLowerCase().endsWith(ext));
+    if (withExt.length === 1) return withExt[0].id;
+    if (withExt.length > 1) return spec; // ambiguous at the preferred extension — do not guess
   }
   return spec;
 }

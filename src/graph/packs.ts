@@ -31,6 +31,9 @@
  * Paths are relative to the pack directory. `tags` is optional — without it the
  * grammar goes through generic.ts's node-kind walker (symbols, no calls), as OCaml and
  * Zig do today. `lsp.args` defaults to none, `lsp.languageId` to the pack's name.
+ * `"fileModules": true` says a file is a module named by its basename, so each module
+ * the tags query captures as `@reference.module` is a file→file import (see
+ * `LanguagePack`); `"externalModules"` lists the names that never are one.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -46,6 +49,13 @@ export interface LanguagePack {
   grammar: string;
   tags?: string;
   lsp?: { command: string; args?: string[]; languageId?: string };
+  /** A file is a module named by its basename, and a `@reference.module` capture in the
+   * tags query is a file→file import of it. List the implementation extension first in
+   * `extensions`: it wins when an interface file shares the basename. */
+  fileModules?: boolean;
+  /** With `fileModules`: names never resolved (the standard library) — skipped, not
+   * left as unresolved import strings. */
+  externalModules?: string[];
 }
 
 export interface PackLoadResult {
@@ -157,8 +167,15 @@ function loadPack(dir: string): Outcome {
   }
   if (pack.lsp !== undefined && (typeof pack.lsp !== "object" || typeof pack.lsp.command !== "string"))
     return refuse(`"lsp" must be { "command": "…", "args": […], "languageId": "…" }`);
+  if (pack.fileModules !== undefined && typeof pack.fileModules !== "boolean") return refuse(`"fileModules" must be true or false`);
+  if (pack.externalModules !== undefined && (!Array.isArray(pack.externalModules) || !pack.externalModules.every((m) => typeof m === "string")))
+    return refuse(`"externalModules" must be a list of module names`);
 
-  registerGenericLang({ name: pack.name, exts, wasm: pack.name, wasmPath, queryPath });
+  registerGenericLang({
+    name: pack.name, exts, wasm: pack.name, wasmPath, queryPath,
+    fileModules: pack.fileModules === true,
+    externalModules: pack.externalModules ?? [],
+  });
   if (pack.lsp) {
     registerLspServer({
       languages: [pack.name],

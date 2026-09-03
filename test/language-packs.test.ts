@@ -16,7 +16,8 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { loadLanguagePacks, packDirs, resetLanguagePacksForTest } from "../src/graph/packs.js";
-import { genericLangOf, resetGenericLangsForTest, swapGrammarForTest } from "../src/graph/generic.js";
+import { extractGeneric, genericLangOf, resetGenericLangsForTest, swapGrammarForTest, warmGenericGrammars } from "../src/graph/generic.js";
+import { resolveEdges } from "../src/graph/resolve.js";
 import { supportedExtensions, unsupportedExtensions } from "../src/graph/source-files.js";
 import { pickServer, resetLspServersForTest } from "../src/graph/lsp/registry.js";
 import { buildGraph } from "../src/graph/build.js";
@@ -151,4 +152,54 @@ test("a pack's lsp row is picked for its language and shadows nothing built in",
   assert.deepEqual(picked!.args, ["-e", "0"]);
   assert.ok(picked!.command.endsWith("node") && picked!.command.startsWith("/"), "resolved to an absolute path");
   assert.notEqual(pickServer(new Set(["rust"]))?.languageId, "moon", "a pack row never answers for another language");
+});
+
+// A module-per-file language: the pack says `fileModules`, its tags query captures the
+// module a dotted reference names, and each distinct module a file names becomes a
+// file→file import of `<Name>.<ext>` — never the file's own module, never the standard
+// library, never a guess between two same-named files, and the implementation
+// extension (listed first) wins over an interface twin.
+const MOON_MODULE_TAGS = `
+(function_declaration name: (identifier) @name) @definition.function
+(function_declaration name: (dot_index_expression table: (identifier) @name)) @definition.module
+(function_call name: (identifier) @name) @reference.call
+(function_call name: (dot_index_expression table: (identifier) @name)) @reference.module
+`;
+
+test("fileModules: naming a module is a file→file import, resolved to the unique file of that language", async () => {
+  const { repo, home, langs } = repoAndHome();
+  const dir = writePack(langs, "moon", manifest("moon", ".moon", { extensions: [".moon", ".mooni"], fileModules: true, externalModules: ["string"] }));
+  writeFileSync(join(dir, "tags.scm"), MOON_MODULE_TAGS);
+  loadLanguagePacks(repo, { home, warn: (m) => assert.fail(m) });
+  assert.equal(genericLangOf("x.moon")?.fileModules, true);
+  assert.equal(genericLangOf("x.mooni")?.name, "moon");
+  await warmGenericGrammars(["moon"]); // extractGeneric below runs outside a build, which would warm it
+
+  const files: Record<string, string> = {
+    "src/model.moon": "function compute() return 1 end\n",
+    "src/model.mooni": "function compute() end\n", // the interface twin: same basename, second-listed extension
+    "src/loader.moon": "function run() return model.compute() end\nlocal cfg = model.compute()\nlocal s = string.format(\"x\")\n",
+    "src/own.moon": "function Own.helper() return 1 end\nlocal y = Own.helper()\n",
+    "src/a/util.moon": "function go() return 1 end\n",
+    "src/b/util.moon": "function go() return 2 end\n",
+    "src/user.moon": "local u = util.go()\n",
+  };
+  const nodes = [], raw = [];
+  for (const [rel, src] of Object.entries(files)) {
+    const r = extractGeneric(rel, src, "moon");
+    nodes.push(...r.nodes); raw.push(...r.rawEdges);
+  }
+  const imports = resolveEdges(nodes, raw).filter((e) => e.relation === "imports");
+  const from = (src: string) => imports.filter((e) => e.source === src).map((e) => e.target).sort();
+
+  // two references to `model` → ONE edge, to the .moon (first-listed extension), and
+  // `string` (declared external) is not an import at all; an `open`-style top-level
+  // reference (`cfg`, outside any function) counts, since the source is the file.
+  assert.deepEqual(from("src/loader.moon"), ["src/model.moon"]);
+  // the module a file defines itself is never its own import
+  assert.deepEqual(from("src/own.moon"), []);
+  // two `util.moon` → ambiguous → the raw name stays, no guessed edge
+  assert.deepEqual(from("src/user.moon"), ["util"]);
+  // every import is a file→file edge sourced at the file, not at a definition
+  assert.ok(imports.every((e) => !e.source.includes("#")), "imports are sourced at the file");
 });
