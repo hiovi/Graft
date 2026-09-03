@@ -20,6 +20,7 @@ import { genericLangOf, resetGenericLangsForTest, swapGrammarForTest } from "../
 import { supportedExtensions, unsupportedExtensions } from "../src/graph/source-files.js";
 import { pickServer, resetLspServersForTest } from "../src/graph/lsp/registry.js";
 import { buildGraph } from "../src/graph/build.js";
+import { buildRepoMap } from "../src/graph/map.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import { contextDirFor } from "../src/context/node-file.js";
 
@@ -79,6 +80,14 @@ test("a repo-level pack adds a language: discovery, extension routing, -e valida
   assert.ok(defs.every((n) => n.origin === "generic"));
   assert.ok(g!.edges.some((e) => e.relation === "calls" && e.source === "src/a.moon#run" && e.target === "src/a.moon#helper"), "run → helper resolved");
   assert.ok(g!.meta.languages.includes("moon"), `banner lists the pack language (got ${g!.meta.languages.join(", ")})`);
+
+  // `graft map` runs in its own process: it loads the packs itself before reading
+  // the graph, or its header could not name a pack language (`.moon` would route
+  // nowhere). The CLI does exactly this sequence.
+  resetLanguagePacksForTest(); resetGenericLangsForTest(); resetLspServersForTest();
+  loadLanguagePacks(repo, { home, warn: (m) => assert.fail(m) });
+  const header = buildRepoMap(g!, { maxDirs: 5 }).languages;
+  assert.ok(header.includes("moon"), `map header names the pack language (got ${header.join(", ")})`);
 });
 
 test("a pack can add a language but never take one away: every refusal is one warning, nothing else changes", () => {
@@ -118,10 +127,10 @@ test("a home-level pack applies to every repo; a repo-level pack of the same nam
   writePack(homeLangs, "sun", manifest("sun", ".sun_home")); // both — the repo's copy must win
   writePack(langs, "sun", manifest("sun", ".sun"));
 
-  const r = loadLanguagePacks(repo, { home, warn: () => {} });
-  assert.deepEqual(r.loaded, ["sun", "star"], "repo packs first, then home");
-  assert.equal(r.skipped.length, 1);
-  assert.match(r.skipped[0].reason, /already loaded/);
+  const warnings: string[] = [];
+  const r = loadLanguagePacks(repo, { home, warn: (m) => warnings.push(m) });
+  assert.deepEqual(r, { loaded: ["sun", "star"], skipped: [] }, "repo packs first, then home; the shadowed home copy is not a refusal");
+  assert.deepEqual(warnings, [], "precedence is silent");
   assert.equal(genericLangOf("x.sun")?.name, "sun");
   assert.equal(genericLangOf("x.sun_home"), null, "the losing home copy contributed nothing");
   assert.equal(genericLangOf("x.star")?.name, "star");
