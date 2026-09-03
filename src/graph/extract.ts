@@ -94,6 +94,10 @@ export interface RawEdge {
   targetId?: string; // already-resolved target (contains)
   specifier?: string; // module path to resolve (imports / imported-symbol references)
   name?: string; // symbol name to resolve (extends/implements/calls)
+  /** calls: where the callee's name token sits (0-indexed line + UTF-16 column, LSP
+   * style). Lets the opt-in LSP pass ask a language server for the definition of a
+   * call the name resolver had to drop. Only the breadth tier stamps it today. */
+  pos?: { line: number; character: number };
   viaMember?: boolean; // calls: was it `obj.foo()` (→ prefer method targets)?
   /** calls with viaMember: the receiver's resolved type name (from bindings /
    * self / this / Go receiver), when a confident local clue exists. */

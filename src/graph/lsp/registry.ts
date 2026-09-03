@@ -21,6 +21,9 @@ export const LSP_SERVERS: readonly LspServer[] = [
   { languages: ["go"], command: "gopls", args: [], languageId: "go" },
   { languages: ["python"], command: "pyright-langserver", args: ["--stdio"], languageId: "python" },
   { languages: ["typescript", "javascript", "tsx"], command: "typescript-language-server", args: ["--stdio"], languageId: "typescript" },
+  // @rescript/language-server has definition/references but no call hierarchy, so
+  // enrich.ts takes its references path for this one.
+  { languages: ["rescript"], command: "rescript-language-server", args: ["--stdio"], languageId: "rescript" },
 ];
 
 const resolved = new Map<string, string | null>();

@@ -4,20 +4,25 @@
  * graft can't infer, and every call in the generic breadth tier (which has no
  * receiver typing at all). For each function/method node we ask the language
  * server for its outgoing calls (call hierarchy) and map each callee's definition
- * back to a graft node, adding a `calls` edge stamped `lsp_resolved`. Precision is
- * the server's (compiler-grade), so this closes the edge-recall gap WITHOUT the
- * name-guessing that halved precision (see resolve.ts). Best-effort: no server /
- * a timeout / an error → the graph is returned unchanged.
+ * back to a graft node, adding a `calls` edge stamped `lsp_resolved`. A server with
+ * no call hierarchy (@rescript/language-server) is asked, for each call the static
+ * resolver dropped as unknown or ambiguous, where the callee is defined — the exact
+ * question name resolution could not answer — or, when the build passed no call
+ * sites, for each function's references (the same edges seen from the callee: every
+ * in-repo location that names it, inside another function, is a caller). Precision
+ * is the server's (compiler-grade), so this closes the edge-recall gap WITHOUT the
+ * name-guessing that halved precision (see resolve.ts). Best-effort: no server / a
+ * timeout / an error → the graph is returned unchanged.
  */
 import { join } from "node:path";
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { relPosix } from "../../util/paths.js";
-import { languageLabelOf } from "../extract.js";
+import { languageLabelOf, type RawEdge } from "../extract.js";
 import { genericLangOf } from "../generic.js";
 import type { GraphV1, NodeV1, EdgeV1 } from "../types.js";
-import { LspClient, type CallHierarchyItem } from "./client.js";
-import { pickServer } from "./registry.js";
+import { LspClient, type LspProbe } from "./client.js";
+import { pickServer, type LspServer } from "./registry.js";
 
 const CALLABLE = new Set<NodeV1["kind"]>(["function", "method"]);
 const DEFN = new Set<NodeV1["kind"]>(["function", "method", "class", "struct", "interface", "type", "enum"]);
@@ -30,16 +35,25 @@ const parseSpan = (s: string): [number, number] | null => {
   return m ? [Number(m[1]), Number(m[2])] : null;
 };
 
-export interface LspEnrichResult { added: number; queried: number; server: string | null }
+export interface LspEnrichResult { added: number; queried: number; server: string | null; probe?: LspProbe }
 
 export async function enrichWithLsp(
   graph: GraphV1,
   root: string,
-  opts: { onProgress?: (done: number, total: number) => void; maxNodes?: number } = {},
+  opts: {
+    onProgress?: (done: number, total: number) => void;
+    maxNodes?: number;
+    /** Test seam: the server to spawn, instead of the registry's pick for the repo's languages. */
+    server?: LspServer;
+    /** The `calls` raw edges the resolver dropped, with their positions (resolve.ts's
+     * `unresolvedCalls` sink). With a server that has no call hierarchy these are what
+     * gets asked about — one definition request per dropped call. */
+    callSites?: RawEdge[];
+  } = {},
 ): Promise<LspEnrichResult> {
   const languagesPresent = new Set<string>();
   for (const n of graph.nodes) { const l = langOf(n.path); if (l) languagesPresent.add(l); }
-  const server = pickServer(languagesPresent);
+  const server = opts.server ?? pickServer(languagesPresent);
   if (!server) return { added: 0, queried: 0, server: null };
 
   // Canonicalize the root: servers (rust-analyzer/clangd) report callee URIs
@@ -73,6 +87,24 @@ export async function enrichWithLsp(
 
   const client = new LspClient(server.command, server.args, root, server.languageId);
   if (!(await client.initialize())) { await client.dispose(); return { added: 0, queried: 0, server: server.command }; }
+  // Outgoing call hierarchy is the instrument where a server advertises it. Without
+  // it: the definition of each dropped call, when the build handed us call sites and
+  // the server answers definition (every server does); else, references. A server
+  // advertising neither flag keeps the call-hierarchy path exactly as before (it may
+  // register the capability dynamically).
+  const sites = (opts.callSites ?? []).filter((e) => {
+    if (!e.pos || !e.name || !serverLangs.has(langOf(e.file) ?? "")) return false;
+    const src = byId.get(e.source);
+    return !!src && CALLABLE.has(src.kind);
+  });
+  const probe: LspProbe = client.supports("callHierarchyProvider")
+    ? "callHierarchy"
+    : sites.length && client.supports("definitionProvider")
+      ? "definition"
+      : client.supports("referencesProvider")
+        ? "references"
+        : "callHierarchy";
+  if (probe === "definition" && opts.maxNodes && sites.length > opts.maxNodes) sites.length = opts.maxNodes;
 
   const existing = new Set(graph.edges.map((e) => `${e.source}\0${e.relation}\0${e.target}`));
   const fileLines = new Map<string, string[]>();
@@ -97,44 +129,88 @@ export async function enrichWithLsp(
   };
 
   // Wait for the server to finish indexing (it answers call-hierarchy empty
-  // until ready). Warm up on the first source node that has a findable position.
-  const warm = sources.find((s) => namePos(s));
-  if (warm) {
-    const wp = namePos(warm)!;
-    if (!(await client.waitUntilReady(join(root, warm.path), wp))) {
-      await client.dispose();
-      return { added: 0, queried: 0, server: server.command }; // never became ready
+  // until ready). Warm up on the first source node that has a findable position —
+  // or, for the definition walk, on the first call site, without insisting: a call
+  // whose callee lives outside the repo legitimately has no definition to give.
+  if (probe === "definition") {
+    await client.waitUntilReady(join(root, sites[0].file), sites[0].pos!, probe, 10000);
+  } else {
+    const warm = sources.find((s) => namePos(s));
+    if (warm) {
+      const wp = namePos(warm)!;
+      if (!(await client.waitUntilReady(join(root, warm.path), wp, probe))) {
+        await client.dispose();
+        return { added: 0, queried: 0, server: server.command, probe }; // never became ready
+      }
     }
   }
 
   let added = 0, queried = 0;
+  // The graft node a server location lands in, or null when it is outside the repo
+  // (a dependency) or outside every definition. In-repo iff the repo-relative path
+  // doesn't escape the root (a raw `startsWith(root)` is separator-unsafe: root=/a/foo
+  // matches /a/foo-bar).
+  const nodeAtUri = (uri: string, line0: number): NodeV1 | null => {
+    let abs: string;
+    try { abs = fileURLToPath(uri); } catch { return null; }
+    const rel = relPosix(root, abs);
+    if (rel.startsWith("..") || rel.startsWith("/")) return null;
+    return nodeAt(rel, line0 + 1);
+  };
+  const link = (from: NodeV1, to: NodeV1): void => {
+    if (from.id === to.id) return;
+    const key = `${from.id}\0calls\0${to.id}`;
+    if (existing.has(key)) return;
+    existing.add(key);
+    graph.edges.push({ source: from.id, target: to.id, relation: "calls", confidence: "lsp_resolved" } as EdgeV1);
+    added++;
+  };
+  if (probe === "definition") {
+    for (const site of sites) {
+      const abs = join(root, site.file);
+      client.didOpen(abs);
+      const locs = await client.definition(abs, site.pos!);
+      if (!locs.length) continue;
+      queried++;
+      opts.onProgress?.(queried, sites.length);
+      const caller = byId.get(site.source)!;
+      for (const loc of locs) {
+        const target = nodeAtUri(loc.uri, loc.range.start.line);
+        if (target) link(caller, target);
+      }
+    }
+    await client.dispose();
+    return { added, queried, server: server.command, probe };
+  }
+
   for (const src of sources) {
     const abs = join(root, src.path);
     client.didOpen(abs);
     const pos = namePos(src);
     if (!pos) continue;
 
-    const items = await client.prepareCallHierarchy(abs, pos);
-    if (!items.length) continue;
-    queried++;
-    opts.onProgress?.(queried, sources.length);
-    const callees = await client.outgoingCalls(items[0]);
-    for (const callee of callees) {
-      let calleeAbs: string;
-      try { calleeAbs = fileURLToPath(callee.uri); } catch { continue; }
-      const rel = relPosix(root, calleeAbs);
-      // In-repo iff the repo-relative path doesn't escape the root. (A raw
-      // `startsWith(root)` is separator-unsafe: root=/a/foo matches /a/foo-bar.)
-      if (rel.startsWith("..") || rel.startsWith("/")) continue; // external/dependency
-      const target = nodeAt(rel, (callee.selectionRange?.start.line ?? callee.range.start.line) + 1);
-      if (!target || target.id === src.id) continue;
-      const key = `${src.id}\0calls\0${target.id}`;
-      if (existing.has(key)) continue;
-      existing.add(key);
-      graph.edges.push({ source: src.id, target: target.id, relation: "calls", confidence: "lsp_resolved" } as EdgeV1);
-      added++;
+    if (probe === "callHierarchy") {
+      const items = await client.prepareCallHierarchy(abs, pos);
+      if (!items.length) continue;
+      queried++;
+      opts.onProgress?.(queried, sources.length);
+      for (const callee of await client.outgoingCalls(items[0])) {
+        const target = nodeAtUri(callee.uri, callee.selectionRange?.start.line ?? callee.range.start.line);
+        if (target) link(src, target);
+      }
+    } else {
+      // Each reference is a caller when it sits inside another callable definition; a
+      // reference from a type or from module level (a constant initialiser) is not a call.
+      const refs = await client.references(abs, pos);
+      if (!refs.length) continue;
+      queried++;
+      opts.onProgress?.(queried, sources.length);
+      for (const ref of refs) {
+        const caller = nodeAtUri(ref.uri, ref.range.start.line);
+        if (caller && CALLABLE.has(caller.kind)) link(caller, src);
+      }
     }
   }
   await client.dispose();
-  return { added, queried, server: server.command };
+  return { added, queried, server: server.command, probe };
 }

@@ -458,7 +458,7 @@ function tagsExtract(
   // @reference.call too (Ruby tags `def foo`'s `foo` as both @name and a call),
   // producing bogus self-loops (foo→foo). Skip any call at a definition's name token.
   const defNameAt = new Set<number>();
-  const calls: Array<{ name: string; at: number }> = [];
+  const calls: Array<{ name: string; at: number; pos: { line: number; character: number } }> = [];
   const refs: Array<{ name: string; at: number }> = [];
   for (const m of matches) {
     const cap: Record<string, TsNode> = {};
@@ -468,8 +468,11 @@ function tagsExtract(
       defNameAt.add(cap.name.startIndex);
       mkDef(cap.name.text, KIND[defKey.slice("definition.".length)] ?? "function", defScope(cap[defKey], langName));
     }
-    if (("reference.call" in cap || "reference.send" in cap) && cap.name)
-      calls.push({ name: cap.name.text, at: cap.name.startIndex });
+    if (("reference.call" in cap || "reference.send" in cap) && cap.name) {
+      // web-tree-sitter reports columns in UTF-16 code units, which is what LSP wants.
+      const { row, column } = cap.name.startPosition;
+      calls.push({ name: cap.name.text, at: cap.name.startIndex, pos: { line: row, character: column } });
+    }
     // Structural references the grammar already marks: a supertype (extends), an
     // implemented interface, an object creation (`new Foo`), a module alias. Grammars
     // label these @reference.class/.interface/.implementation/.module — heterogeneous
@@ -489,7 +492,7 @@ function tagsExtract(
   for (const c of calls) {
     if (defNameAt.has(c.at)) continue;
     const enc = enclosing(c.at);
-    rawEdges.push({ source: enc ? enc.id : rel, relation: "calls", file: rel, name: c.name });
+    rawEdges.push({ source: enc ? enc.id : rel, relation: "calls", file: rel, name: c.name, pos: c.pos });
   }
   for (const r of refs) {
     if (defNameAt.has(r.at)) continue;
