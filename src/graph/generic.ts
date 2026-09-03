@@ -4,8 +4,9 @@
  * graft covers the long tail of languages for ~one registry row each, instead of
  * a hand-written extractor per language (the depth tier in extract.ts).
  *
- * Grammars are WASM (`tree-sitter-wasm` bundle) loaded via `web-tree-sitter`, so
- * a new language needs no native node-gyp build. Loading is async (WASM init), so
+ * Grammars are WASM loaded via `web-tree-sitter` — the `tree-sitter-wasm` bundle, or
+ * a build vendored under grammars/ for a language the bundle doesn't ship — so a new
+ * language needs no native node-gyp build. Loading is async (WASM init), so
  * callers MUST `await warmGenericGrammars([...])` once before the synchronous
  * `extractGeneric()` is used in a build/check loop. If a grammar isn't warmed,
  * `extractGeneric` degrades to a file node only (never throws).
@@ -29,9 +30,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 // queries/ ships beside the compiled JS (copied by the build); fall back to src.
 const QUERY_DIRS = [join(HERE, "queries"), join(HERE, "..", "..", "src", "graph", "queries")];
+// Grammars the tree-sitter-wasm bundle doesn't ship are vendored beside the queries
+// (grammars/<wasm>/tree-sitter-<wasm>.wasm) and copied to dist by the same build step.
+const GRAMMAR_DIRS = [join(HERE, "grammars"), join(HERE, "..", "..", "src", "graph", "grammars")];
 
 /** A breadth-tier language: graft name, file extensions, and the wasm basename
- * in tree-sitter-wasm/<wasm>/tree-sitter-<wasm>.wasm. One row per language. */
+ * in tree-sitter-wasm/<wasm>/tree-sitter-<wasm>.wasm (or a vendored
+ * grammars/<wasm>/tree-sitter-<wasm>.wasm). One row per language. */
 export interface GenericLang {
   name: string;
   exts: string[];
@@ -58,6 +63,8 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "clojure", exts: [".clj", ".cljs", ".cljc", ".bb"], wasm: "clojure" },
   { name: "nix", exts: [".nix"], wasm: "nix" },
   { name: "lua", exts: [".lua"], wasm: "lua" },
+  // tree-sitter-wasm has no ReScript grammar; the wasm is vendored under grammars/rescript.
+  { name: "rescript", exts: [".res", ".resi"], wasm: "rescript" },
 ];
 
 const byExt = new Map<string, GenericLang>();
@@ -91,8 +98,16 @@ let tsMod: typeof import("web-tree-sitter") | null = null;
 let initPromise: Promise<void> | null = null;
 
 function requireWasm(wasm: string): Buffer | null {
-  // Resolve the grammar wasm from the tree-sitter-wasm bundle (its package.json
-  // `exports` maps the bare "<lang>/…" subpath to the actual "out/<lang>/…" file).
+  // A vendored grammar wins: its query was written against that exact build.
+  for (const dir of GRAMMAR_DIRS) {
+    try {
+      return readFileSync(join(dir, wasm, `tree-sitter-${wasm}.wasm`));
+    } catch {
+      /* not vendored here */
+    }
+  }
+  // Else the tree-sitter-wasm bundle (its package.json `exports` maps the bare
+  // "<lang>/…" subpath to the actual "out/<lang>/…" file).
   try {
     const p = require.resolve(`tree-sitter-wasm/${wasm}/tree-sitter-${wasm}.wasm`);
     return readFileSync(p);
@@ -281,7 +296,60 @@ export function extractGeneric(rel: string, source: string, langName: string): E
   if (langName === "c" || langName === "cpp") extractIncludes(tree.rootNode as TsNode, rel, rawEdges);
   else if (langName === "rust") extractUses(tree.rootNode as TsNode, rel, rawEdges);
   else if (langName === "php") extractPhpUses(tree.rootNode as TsNode, rel, rawEdges);
+  else if (langName === "rescript") extractRescriptModuleRefs(tree.rootNode as TsNode, rel, rawEdges);
   return { nodes, rawEdges };
+}
+
+/** ReScript has no import statement: every file is a module named by its basename, and
+ * naming one — `Foo.bar(x)`, `open Foo`, `Foo.t`, `Foo.Variant`, `<Foo />` — IS the
+ * dependency on `Foo.res`. Emit one file→module `imports` raw edge per distinct module
+ * the file names. Only a path's FIRST segment can be a file (`Belt.Array.map` → `Belt`;
+ * the rest are submodules), so that is the specifier. Modules the file defines itself
+ * (`module Inner = …`, a functor's `(M: S)` parameter, its own name) are skipped: a
+ * same-named file elsewhere in the repo would otherwise become a false edge. resolve.ts
+ * settles the name to a unique in-repo `<Name>.res`, and keeps it as a string (`Belt`,
+ * `React`, a dependency or a namespaced package) when it cannot — never a guess. */
+function extractRescriptModuleRefs(root: TsNode, rel: string, rawEdges: RawEdge[]): void {
+  const own = new Set<string>([(rel.split("/").pop() ?? rel).replace(/\.resi?$/i, "")]);
+  const named = new Set<string>();
+  // The first segment of a dotted path: no earlier sibling of the same identifier type
+  // (`Belt.Array` is one module_identifier_path holding two module_identifiers).
+  const firstSegment = (n: TsNode): boolean => {
+    const p = n.parent;
+    if (!p?.namedChild) return true;
+    for (let i = 0; i < (p.namedChildCount ?? 0); i++) {
+      const c = p.namedChild(i);
+      if (!c || c.startIndex >= n.startIndex) break;
+      if (c.type === n.type) return false;
+    }
+    return true;
+  };
+  const visit = (n: TsNode): void => {
+    if (n.type === "module_binding") {
+      const name = n.childForFieldName?.("name");
+      if (name?.text) own.add(name.text);
+    } else if (n.type === "functor_parameter") {
+      const id = n.namedChild?.(0);
+      if (id?.type === "module_identifier") own.add(id.text);
+    } else if (n.type === "module_identifier") {
+      const p = n.parent;
+      const isBinding =
+        p?.type === "functor_parameter" ||
+        (p?.type === "module_binding" && p.childForFieldName?.("name")?.startIndex === n.startIndex);
+      if (!isBinding && firstSegment(n)) named.add(n.text);
+    } else if (n.type === "jsx_identifier") {
+      // `<Foo />` mounts Foo.make; `<div>` is an intrinsic element, not a module.
+      if (/^[A-Z]/.test(n.text) && firstSegment(n)) named.add(n.text);
+    }
+    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
+      const c = n.namedChild?.(i);
+      if (c) visit(c);
+    }
+  };
+  visit(root);
+  for (const m of named) {
+    if (!own.has(m)) rawEdges.push({ source: rel, relation: "imports", specifier: m, file: rel });
+  }
 }
 
 /** PHP `use App\Models\User;` → a file→class-file `imports` raw edge, one per imported
@@ -518,6 +586,11 @@ function nextNamedSibling(n: TsNode): TsNode | null {
   return null;
 }
 function defScope(node: TsNode, langName?: string): TsNode {
+  // ReScript's captured nodes (let_binding, type_binding, module_binding) already span
+  // their bodies, and `let rec a = … and b = …` is ONE let_declaration holding both:
+  // expanding to it would give the two bindings one span, and the dedup in extractGeneric
+  // would drop the second. Gated on rescript so other breadth-tier languages are untouched.
+  if (langName === "rescript") return node;
   let n = node;
   while (n.parent && DEF_CONTAINER.test(n.parent.type)) n = n.parent;
   // Dart's grammar leaves `function_signature` / `method_signature` as a sibling

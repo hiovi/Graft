@@ -34,6 +34,20 @@ const PY_CTOR_KINDS: Kind[] = ["class"];
  * implicit-self widening) have found nothing. */
 const SWIFT_EXT = /\.swift$/i;
 const SWIFT_CTOR_KINDS: Kind[] = ["class", "struct", "enum"];
+/** ReScript implementation + interface files, for resolving module-name imports. */
+const RESCRIPT_EXT = /\.resi?$/i;
+/** The modules the ReScript compiler ships (`Stdlib.res`'s aliases plus the legacy
+ * roots): named in nearly every file, never an in-repo target to navigate to — the
+ * `<stdio.h>` of ReScript. A repo file of the same name shadows the stdlib for the
+ * compiler too, so one still resolves; only the unshadowed name is dropped. */
+const RESCRIPT_STDLIB = new Set([
+  "Array", "ArrayBuffer", "AsyncIterator", "Belt", "BigInt", "BigInt64Array", "BigUint64Array", "Bool",
+  "Console", "DataView", "Date", "Dict", "Dom", "Error", "Exn", "Float", "Float32Array", "Float64Array",
+  "Int", "Int16Array", "Int32Array", "Int8Array", "Intl", "Iterator", "JSON", "Js", "JsError", "JsExn",
+  "Lazy", "List", "Map", "Math", "Null", "Nullable", "Object", "Option", "Ordering", "Pair", "Pervasives",
+  "Promise", "RegExp", "Result", "Set", "Stdlib", "String", "Symbol", "Type", "TypedArray", "Uint16Array",
+  "Uint32Array", "Uint8Array", "Uint8ClampedArray", "WeakMap", "WeakSet",
+]);
 
 /**
  * Languages whose symbols can genuinely reach each other. A call edge may not
@@ -128,6 +142,9 @@ export function resolveEdges(
   // node ids. A `use App\Models\User` names a PSR-4 class whose file mirrors the namespace
   // tail under some (unknown) source root, so the suffix is the portable key.
   const phpFilesBySuffix = new Map<string, string[]>();
+  // ReScript module resolution: a file IS a module, named by its basename
+  // (`src/Counter.res` → `Counter`), so a `Counter.x` anywhere names that file.
+  const rescriptFilesByName = new Map<string, string[]>();
   const hasGoModules = !!opts.goModules?.length;
   for (const n of nodes) {
     if (n.kind === "file") {
@@ -149,6 +166,9 @@ export function resolveEdges(
       if (n.path.endsWith(".php")) {
         const parts = toPosixPath(n.path).split("/");
         for (let i = 0; i < parts.length; i++) push(phpFilesBySuffix, parts.slice(i).join("/"), n.id);
+      }
+      if (RESCRIPT_EXT.test(n.path)) {
+        push(rescriptFilesByName, posix.basename(toPosixPath(n.path)).replace(RESCRIPT_EXT, ""), n.id);
       }
       {
         const p = toPosixPath(n.path);
@@ -205,7 +225,7 @@ export function resolveEdges(
     if (e.relation === "contains" && e.targetId) {
       add(e.source, e.targetId, "contains", "extracted");
     } else if (e.relation === "imports" && e.specifier) {
-      const target =
+      const target: string | null =
         hasGoModules && e.file.endsWith(".go")
           ? resolveGoImport(e.specifier, opts.goModules!, goFilesByDir)
           : e.file.endsWith(".java")
@@ -216,7 +236,10 @@ export function resolveEdges(
                 ? resolveRustUse(e.specifier, e.file, byId, rustCrateRoots)
                 : e.file.endsWith(".php")
                   ? resolvePhpUse(e.specifier, phpFilesBySuffix)
-                  : resolveImport(e.specifier, e.file, byId);
+                  : RESCRIPT_EXT.test(e.file)
+                    ? resolveRescriptModule(e.specifier, rescriptFilesByName)
+                    : resolveImport(e.specifier, e.file, byId);
+      if (target === null) continue; // an unshadowed ReScript stdlib module — nothing to navigate to
       add(e.source, target, "imports", "extracted");
     } else if (e.relation === "extends" || e.relation === "implements") {
       // `implements` also resolves to a `trait` — PHP models trait composition
@@ -538,6 +561,26 @@ function resolveJavaImport(spec: string, filesBySuffix: Map<string, string[]>): 
     const enclosing = hit(spec.slice(0, dot));
     if (enclosing) return enclosing;
   }
+  return spec;
+}
+
+/**
+ * Resolve a ReScript module name to the in-repo file that defines it. Every `.res` file
+ * is a module named by its basename, so `Counter` → the unique `Counter.res`. Its `.resi`
+ * interface (same basename) describes the same module and is never a competitor: it is
+ * the target only when no `.res` exists. Two `Counter.res` in the repo (a monorepo with
+ * one `App.res` per app, say) are ambiguous, and a name that is no file at all is a
+ * dependency (`React`) or a namespaced package's module — both stay the raw name
+ * rather than a guessed edge. A stdlib module (`Array`, `Option`, `Belt`, …) is the
+ * exception: unless exactly one repo file shadows it, it is dropped outright (null) —
+ * kept, it would be an edge to a string on nearly every file, saying nothing.
+ */
+function resolveRescriptModule(spec: string, byName: Map<string, string[]>): string | null {
+  const hits = byName.get(spec) ?? [];
+  const impl = hits.filter((id) => /\.res$/i.test(id));
+  if (impl.length === 1) return impl[0];
+  if (impl.length === 0 && hits.length === 1) return hits[0];
+  if (RESCRIPT_STDLIB.has(spec)) return null;
   return spec;
 }
 

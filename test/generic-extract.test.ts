@@ -132,6 +132,14 @@ const SNIPPETS: Array<{ lang: string; file: string; src: string; defs: string[];
     src: `let\n  helper = x: x + 1;\nin {\n  greet = name: helper 2;\n  version = "1.0";\n}\n`,
     defs: ["function:greet", "function:helper"], call: ["greet", "helper"],
   },
+  {
+    // ReScript: a module-level `let` bound to a function is a function, a plain value a
+    // constant; a call inside a function body attributes to that function. The wasm is
+    // vendored under src/graph/grammars (tree-sitter-wasm has no ReScript).
+    lang: "rescript", file: "a.res",
+    src: `let helper = (n: int) => n + 1\n\nlet limit = 3\n\nlet run = () => {\n  let n = helper(limit)\n  n\n}\n`,
+    defs: ["constant:limit", "function:helper", "function:run"], call: ["run", "helper"],
+  },
 ];
 
 for (const s of SNIPPETS) {

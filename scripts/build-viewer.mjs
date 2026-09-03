@@ -42,3 +42,21 @@ for (const f of readdirSync(scmSrc)) {
   }
 }
 console.log(`grammar queries → dist/graph/queries/ (${scmCount} .scm)`);
+
+// Grammars the tree-sitter-wasm bundle doesn't ship are vendored the same way
+// (src/graph/grammars/<lang>/tree-sitter-<lang>.wasm); generic.ts looks in
+// dist/graph/grammars first, then src/graph/grammars.
+const wasmSrc = join(root, "src", "graph", "grammars");
+const wasmOut = join(root, "dist", "graph", "grammars");
+let wasmCount = 0;
+for (const lang of readdirSync(wasmSrc, { withFileTypes: true })) {
+  if (!lang.isDirectory()) continue;
+  mkdirSync(join(wasmOut, lang.name), { recursive: true });
+  for (const f of readdirSync(join(wasmSrc, lang.name))) {
+    if (f.endsWith(".wasm")) {
+      copyFileSync(join(wasmSrc, lang.name, f), join(wasmOut, lang.name, f));
+      wasmCount++;
+    }
+  }
+}
+console.log(`vendored grammars → dist/graph/grammars/ (${wasmCount} .wasm)`);
