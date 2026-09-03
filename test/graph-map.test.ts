@@ -76,15 +76,16 @@ test("buildRepoMap: totals count files, symbols, edges, and languages across the
     fileNode("src/a.ts"),
     symNode("src/a.ts", "fnA"),
     fileNode("docs/readme.py"), // deliberately mixed languages
+    fileNode("core/lib.rs"), // a breadth-tier language counts too
     symNode("docs/readme.py", "fnB"),
   ];
   const edges = [edge("src/a.ts#fnA", "docs/readme.py#fnB")];
   const map = buildRepoMap(graphOf(nodes, edges));
 
-  assert.equal(map.totals.files, 2);
+  assert.equal(map.totals.files, 3);
   assert.equal(map.totals.symbols, 2);
   assert.equal(map.totals.edges, 1);
-  assert.deepEqual(map.totals.languages, ["python", "typescript"]);
+  assert.deepEqual(map.totals.languages, ["python", "rust", "typescript"]);
 });
 
 test("buildRepoMap: dirs are grouped by first path segment and sorted by symbol count desc", () => {

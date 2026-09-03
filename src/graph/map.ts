@@ -20,6 +20,7 @@
  */
 import type { GraphV1, NodeV1 } from "./types.js";
 import { languageLabelOf } from "./extract.js";
+import { genericLangOf } from "./generic.js";
 import { WALK_RELATIONS } from "./relations.js";
 import { scopeLabel, scopeOf, scopesOfGraph } from "./scopes.js";
 import { withSavings, savingsFor, type Savings } from "../context/savings.js";
@@ -128,11 +129,13 @@ function topHubs(nodes: NodeV1[], inDegree: Map<string, number>, cap: number): H
 }
 
 /** Display labels, not tree-sitter grammars: a `scripts/` tree of `.mjs` files is
- * "javascript" here, not "typescript". See {@link languageLabelOf}. */
+ * "javascript" here, not "typescript". See {@link languageLabelOf}. Breadth-tier
+ * files (Rust, ReScript, …) are labelled by their generic-tier language — the
+ * header used to list a Rust repo's languages as nothing at all. */
 function sortedLanguages(paths: string[]): string[] {
   const set = new Set<string>();
   for (const p of paths) {
-    const label = languageLabelOf(p);
+    const label = languageLabelOf(p) ?? genericLangOf(p)?.name;
     if (label) set.add(label);
   }
   return [...set].sort();
