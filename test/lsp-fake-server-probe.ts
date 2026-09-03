@@ -11,7 +11,7 @@
  * references, the shape of @rescript/language-server) or `callHierarchy`.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createMessageConnection, StreamMessageReader, StreamMessageWriter } from "vscode-jsonrpc/node.js";
 
@@ -56,7 +56,7 @@ const occurrences = (word: string, module: string, includeDeclaration: boolean):
   }
   return out;
 };
-const moduleOf = (abs: string): string => (abs.split("/").pop() ?? "").replace(/\.(res|rs)$/, "");
+const moduleOf = (abs: string): string => basename(abs).replace(/\.(res|rs)$/, "");
 /** The declaration of `word`, preferring the file a qualifier names: at `Model.compute`
  * the answer is Model.res's `compute`, however many other files declare one. */
 const declarationOf = (word: string, preferModule?: string): Loc | null => {
