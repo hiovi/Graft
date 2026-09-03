@@ -86,7 +86,7 @@ test("a repo-level pack adds a language: discovery, extension routing, -e valida
   // nowhere). The CLI does exactly this sequence.
   resetLanguagePacksForTest(); resetGenericLangsForTest(); resetLspServersForTest();
   loadLanguagePacks(repo, { home, warn: (m) => assert.fail(m) });
-  const header = buildRepoMap(g!, { maxDirs: 5 }).languages;
+  const header = buildRepoMap(g!, { maxDirs: 5 }).totals.languages;
   assert.ok(header.includes("moon"), `map header names the pack language (got ${header.join(", ")})`);
 });
 
