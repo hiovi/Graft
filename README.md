@@ -210,6 +210,9 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
   `lsp_resolved` call edges (member calls the static pass can't type) when a
   language server is on your `PATH`: **rust-analyzer** (Rust), **clangd** (C/C++),
   **gopls** (Go), **pyright** (Python), **typescript-language-server** (TS/JS).
+  A server without call hierarchy still contributes: graft asks it for the
+  definition of each call the static pass had to drop as ambiguous, or walks its
+  references when there is nothing to ask about.
   It's best-effort — with no server installed the graph is unchanged.
 
 Twenty-three languages in total. A file whose language isn't listed is skipped, not

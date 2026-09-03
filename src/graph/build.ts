@@ -288,7 +288,11 @@ export async function buildGraph(
     files: entries,
   });
 
-  const edges = resolveEdges(nodes, rawEdges, { goModules: readGoModules(root, repoFiles) });
+  // Calls the name resolver had to drop (unknown or ambiguous callee) keep their
+  // positions here, so the opt-in LSP pass below can ask a language server for each
+  // one's definition instead of re-guessing by name.
+  const unresolvedCalls: RawEdge[] = [];
+  const edges = resolveEdges(nodes, rawEdges, { goModules: readGoModules(root, repoFiles), unresolvedCalls });
 
   // Guard 5 (minimum-substance): node counts aren't known until nodes are
   // assembled, so the merge-tiny-scopes-into-root guard runs here.
@@ -331,9 +335,9 @@ export async function buildGraph(
   // touches the extraction cache (Tier-1 stays pristine, cold==incremental).
   if (opts.lsp) {
     const { enrichWithLsp } = await import("./lsp/enrich.js");
-    const r = await enrichWithLsp(graph, root);
+    const r = await enrichWithLsp(graph, root, { callSites: unresolvedCalls });
     graph.meta.edgeCount = graph.edges.length;
-    opts.onProgress?.({ phase: "enrich", index: r.added, total: r.queried, file: `lsp:${r.server ?? "none"}` });
+    opts.onProgress?.({ phase: "enrich", index: r.added, total: r.queried, file: `lsp:${r.server ?? "none"}${r.probe ? ` (${r.probe})` : ""}` });
   }
 
   const graphPath = writeGraph(graph, outDir);
