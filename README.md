@@ -233,6 +233,13 @@ indexed. Adding a broad-tier language is a small contribution — see
     "tags": "tags.scm", "lsp": { "command": "moon-lsp", "args": ["--stdio"] } }
   ```
 
+  For a language where a file *is* a module (ReScript, OCaml, Elm), add
+  `"fileModules": true`: every module the tags query captures as
+  `@reference.module` becomes a file→file import of `<Name>.<ext>` (the file's own
+  modules excepted; list the implementation extension first so it beats an
+  interface twin), and `"externalModules": ["Belt", …]` names the standard
+  library so it is skipped rather than left as an unresolved string.
+
 ---
 
 ## What's in a node
