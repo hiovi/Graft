@@ -14,7 +14,7 @@ import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "..
 import { languageOf, depthExtensions } from "./extract.js";
 import { genericLangOf, genericExtensions } from "./generic.js";
 import { containerLangOf, containerExtensions } from "./container.js";
-import { loadLanguagePacks } from "./packs.js";
+import { loadLanguagePacks, loadNamespaces } from "./packs.js";
 
 /** Every extension graft has a parser for (depth + breadth + container), sorted
  * and de-duped — the authoritative answer to "what does `-e` actually support". */
@@ -77,6 +77,9 @@ export function listSourceFiles(
   // Language packs (`<root>/.graft/langs`, `~/.graft/langs`) add breadth-tier rows;
   // they must be registered before the extension filter below decides what is source.
   loadLanguagePacks(root);
+  // A pack's package namespaces come from manifests in this same walk (`rescript.json`
+  // → namespace `Matrix` → its directory), read once per root for the resolver.
+  loadNamespaces(root, repoFiles);
   // A file is a source file if a depth-tier grammar (languageOf), a breadth-tier
   // grammar (genericLangOf) or a container (containerLangOf) claims its extension.
   // All three must agree here or `build` and `check` would enumerate different sets.

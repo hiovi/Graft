@@ -238,7 +238,11 @@ indexed. Adding a broad-tier language is a small contribution — see
   `@reference.module` becomes a file→file import of `<Name>.<ext>` (the file's own
   modules excepted; list the implementation extension first so it beats an
   interface twin), and `"externalModules": ["Belt", …]` names the standard
-  library so it is skipped rather than left as an unresolved string.
+  library so it is skipped rather than left as an unresolved string. When packages
+  carry a namespace, `"namespaces": "rescript.json"` names the manifest whose
+  `namespace` field (or `name`, when it is `true`) prefixes that package's modules,
+  so `Matrix.Encode` resolves inside the package declaring `Matrix` and a file in
+  that package sees its siblings unqualified.
 
 ---
 
