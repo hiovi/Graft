@@ -421,12 +421,20 @@ function tagsExtract(
   // @reference.call too (Ruby tags `def foo`'s `foo` as both @name and a call),
   // producing bogus self-loops (foo→foo). Skip any call at a definition's name token.
   const defNameAt = new Set<number>();
-  const calls: Array<{ name: string; at: number; pos: { line: number; character: number } }> = [];
+  const calls: Array<{ name: string; at: number; pos: { line: number; character: number }; module?: string }> = [];
+  // One call per site: two patterns may match one node (a qualified and a bare shape),
+  // and a second raw edge for the same token would resolve as a second, looser guess.
+  const callAt = new Set<number>();
   const refs: Array<{ name: string; at: number }> = [];
   // Module-per-file languages: every module the file names, and the modules it defines
   // itself (a nested `module Inner`, a `module type S`) — those are never imports.
   const langRow = allLangs().find((l) => l.name === langName);
   const named: string[] = [];
+  // `module P = Matrix.Parse`: a module definition whose query also captures the path it
+  // stands for (`@alias`). A later `P.object(x)` then names Matrix.Parse's file, not a
+  // module called P; without this the alias fell to the bare rule and matched whichever
+  // opened file had an `object`. File-level only — a nested alias shadows nothing here.
+  const aliases = new Map<string, string>();
   const ownModules = new Set<string>([(rel.split("/").pop() ?? rel).replace(/\.[^.]+$/, "")]);
   for (const m of matches) {
     const cap: Record<string, TsNode> = {};
@@ -436,6 +444,10 @@ function tagsExtract(
       defNameAt.add(cap.name.startIndex);
       const kind = KIND[defKey.slice("definition.".length)] ?? "function";
       if (kind === "module" || kind === "interface") ownModules.add(cap.name.text);
+      if (kind === "module" && cap.alias) {
+        aliases.set(cap.name.text, cap.alias.text);
+        if (langRow?.fileModules) named.push(cap.alias.text); // an alias to a module names it
+      }
       mkDef(cap.name.text, kind, defScope(cap[defKey], langName));
     }
     // In a module-per-file language a module reference IS the import (below), and only
@@ -443,10 +455,13 @@ function tagsExtract(
     // `Array.map` into an edge to whichever file declares a nested `module Array`.
     const fileModuleRef = "reference.module" in cap && !!langRow?.fileModules;
     if (fileModuleRef && cap.name) named.push(cap.name.text);
-    if (("reference.call" in cap || "reference.send" in cap) && cap.name) {
+    if (("reference.call" in cap || "reference.send" in cap) && cap.name && !callAt.has(cap.name.startIndex)) {
+      callAt.add(cap.name.startIndex);
       // web-tree-sitter reports columns in UTF-16 code units, which is what LSP wants.
       const { row, column } = cap.name.startPosition;
-      calls.push({ name: cap.name.text, at: cap.name.startIndex, pos: { line: row, character: column } });
+      // `@module` is the qualifier of a qualified call (`Mod.f(x)`, `A.B.f(x)`): in a
+      // module-per-file language it names the file to look in — see resolve.ts.
+      calls.push({ name: cap.name.text, at: cap.name.startIndex, pos: { line: row, character: column }, module: cap.module?.text });
     }
     // Structural references the grammar already marks: a supertype (extends), an
     // implemented interface, an object creation (`new Foo`), a module alias. Grammars
@@ -464,10 +479,25 @@ function tagsExtract(
     defs
       .filter((d) => d.startIndex <= at && at < d.endIndex)
       .sort((a, b) => (a.endIndex - a.startIndex) - (b.endIndex - b.startIndex))[0];
+  // `P.f` with `module P = A.B` is `A.B.f`: expand the first segment through the aliases.
+  const expand = (path: string): string => {
+    const [head, ...rest] = path.split(".");
+    const target = aliases.get(head);
+    return target ? [target, ...rest].join(".") : path;
+  };
+  // A qualifier that is one of this file's own modules (`Type.toString` beside a nested
+  // `module Type`) names THIS file: "." tells resolve.ts to look here and nowhere else.
+  const qualifier = (module: string): string => {
+    const path = expand(module);
+    return ownModules.has(path.split(".")[0]) ? "." : path;
+  };
   for (const c of calls) {
     if (defNameAt.has(c.at)) continue;
     const enc = enclosing(c.at);
-    rawEdges.push({ source: enc ? enc.id : rel, relation: "calls", file: rel, name: c.name, pos: c.pos });
+    rawEdges.push({
+      source: enc ? enc.id : rel, relation: "calls", file: rel, name: c.name, pos: c.pos,
+      ...(c.module && langRow?.fileModules ? { specifier: qualifier(c.module) } : {}),
+    });
   }
   for (const r of refs) {
     if (defNameAt.has(r.at)) continue;
@@ -484,7 +514,10 @@ function tagsExtract(
     const external = new Set(langRow.externalModules ?? []);
     const seen = new Set<string>();
     for (const name of named) {
-      if (seen.has(name) || ownModules.has(name) || external.has(name)) continue;
+      // A dotted path (`Spring.Schema`) is judged by its first segment: that is the
+      // module that is (or is not) this file's own, or the standard library's.
+      const head = name.split(".")[0];
+      if (seen.has(name) || ownModules.has(head) || external.has(head)) continue;
       seen.add(name);
       rawEdges.push({ source: rel, relation: "imports", specifier: name, file: rel });
     }
