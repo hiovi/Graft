@@ -163,7 +163,9 @@ const MOON_MODULE_TAGS = `
 (function_declaration name: (identifier) @name) @definition.function
 (function_declaration name: (dot_index_expression table: (identifier) @name)) @definition.module
 (function_call name: (identifier) @name) @reference.call
+(function_call name: (dot_index_expression table: (identifier) @module field: (identifier) @name)) @reference.call
 (function_call name: (dot_index_expression table: (identifier) @name)) @reference.module
+(variable_declaration (assignment_statement (variable_list name: (identifier) @name) (expression_list value: (identifier) @alias))) @definition.module
 `;
 
 test("fileModules: naming a module is a file→file import, resolved to the unique file of that language", async () => {
@@ -202,4 +204,46 @@ test("fileModules: naming a module is a file→file import, resolved to the uniq
   assert.deepEqual(from("src/user.moon"), ["util"]);
   // every import is a file→file edge sourced at the file, not at a definition
   assert.ok(imports.every((e) => !e.source.includes("#")), "imports are sourced at the file");
+});
+
+test("fileModules: a qualified call resolves inside the named file; a bare cross-file call needs an import", async () => {
+  const { repo, home, langs } = repoAndHome();
+  const dir = writePack(langs, "moon", manifest("moon", ".moon", { fileModules: true, externalModules: ["string"] }));
+  writeFileSync(join(dir, "tags.scm"), MOON_MODULE_TAGS);
+  loadLanguagePacks(repo, { home, warn: (m) => assert.fail(m) });
+  await warmGenericGrammars(["moon"]);
+
+  const files: Record<string, string> = {
+    "src/model.moon": "function compute() return 1 end\n",
+    "src/other.moon": "function compute() return 2 end\n", // `compute` is defined twice: a repo-wide name is ambiguous
+    "src/loader.moon": "function run() return model.compute() end\n",
+    "src/stray.moon": "function go() return compute() end\n", // names nothing — a bare call reaches no file
+    "src/opener.moon": "function prime() return model.compute() end\nfunction go2() return compute() end\n",
+    "src/stdlib.moon": "function fmt() return string.format(\"x\") end\n",
+    // `local P = model` stands for model: `P.compute()` names model's file, not a module P
+    "src/alias.moon": "local P = model\nfunction viaAlias() return P.compute() end\n",
+    // a qualifier that places no file (a dependency, a namespace) resolves nowhere — not
+    // through the bare rule either, even though this file names model
+    "src/consumer.moon": "function prime2() return model.compute() end\nfunction viaVendor() return vendor.compute() end\n",
+  };
+  const nodes = [], raw = [];
+  for (const [rel, src] of Object.entries(files)) {
+    const r = extractGeneric(rel, src, "moon");
+    nodes.push(...r.nodes); raw.push(...r.rawEdges);
+  }
+  const edges = resolveEdges(nodes, raw);
+  const calls = edges.filter((e) => e.relation === "calls").map((e) => `${e.source}→${e.target}:${e.confidence}`).sort();
+  assert.deepEqual(calls, [
+    // the qualifier names the file: certain, despite `compute` existing in other.moon too
+    "src/loader.moon#run→src/model.moon#compute:extracted",
+    "src/opener.moon#prime→src/model.moon#compute:extracted",
+    // a bare call from a file that names model (and only model) reaches it — inferred
+    "src/opener.moon#go2→src/model.moon#compute:inferred",
+    "src/alias.moon#viaAlias→src/model.moon#compute:extracted",
+    "src/consumer.moon#prime2→src/model.moon#compute:extracted",
+    // consumer.moon's `vendor.compute()` and stray.moon's bare `compute()` place no module: dropped, not guessed;
+    // stdlib.moon's `string.format` is external: no edge, no import
+  ].sort());
+  const imports = edges.filter((e) => e.relation === "imports").map((e) => `${e.source}→${e.target}`).sort();
+  assert.deepEqual(imports, ["src/alias.moon→src/model.moon", "src/consumer.moon→src/model.moon", "src/consumer.moon→vendor", "src/loader.moon→src/model.moon", "src/opener.moon→src/model.moon"]);
 });

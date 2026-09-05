@@ -203,6 +203,20 @@ export function resolveEdges(
     push(classTraits, ownName, e.name);
   }
 
+  // Module-per-file languages: which files each file names (its `imports`). A bare
+  // cross-file call there can only reach a module the file opened, so resolution is
+  // gated on this instead of on a repo-wide unique name. Settled up front because a
+  // file's raw calls precede its raw imports in extraction order.
+  const fileImports = new Map<string, Set<string>>();
+  for (const e of rawEdges) {
+    if (e.relation !== "imports" || !e.specifier) continue;
+    const row = genericLangOf(e.file);
+    if (!row?.fileModules) continue;
+    const target = resolveFileModule(e.specifier, row, fileModulesByName);
+    if (!byId.has(target)) continue;
+    if (!fileImports.has(e.file)) fileImports.set(e.file, new Set());
+    fileImports.get(e.file)!.add(target);
+  }
   const out: EdgeV1[] = [];
   const seen = new Set<string>();
   const add = (source: string, target: string, relation: Relation, confidence: EdgeV1["confidence"]) => {
@@ -331,6 +345,38 @@ export function resolveEdges(
           : e.file.endsWith(".java")
             ? ["class", "struct", "enum", "interface"]
             : ["function"]);
+      // Module-per-file languages: a qualified call names the file to look in, and a
+      // bare call can only reach a module the file opened. Measured on a ReScript
+      // monorepo, the repo-wide unique-name rule alone resolved 54% of cross-file calls
+      // to the wrong file (`Array.filterMap` → whichever file defined a `filterMap`)
+      // and linked bare `f()`s across files that never name each other.
+      const fmRow = genericLangOf(e.file);
+      if (fmRow?.fileModules) {
+        const local = (perFileName.get(e.file)?.get(e.name!) ?? []).filter((n) => callKinds.includes(n.kind));
+        if (e.specifier === ".") {
+          // Qualified with one of the file's own modules: this file, and nowhere else.
+          if (local.length === 1) add(e.source, local[0].id, "calls", "extracted");
+          continue;
+        }
+        if (e.specifier) {
+          // A qualified call resolves through its path or not at all. The callee lives in
+          // the first file along the path that has it (`Json.Encode.object` when Json.res
+          // is a facade beside Encode.res); unique there → certain; several (a top-level
+          // `encode` and a nested `Type.encode`) → drop. A path that places no file — the
+          // standard library, a dependency, a namespace, a name two files share — is
+          // dropped too: falling back to the bare rule here is how `E.field` with
+          // `module E = Matrix.Encode` (two Encode.res in the repo) landed on Parse.res.
+          const inFile = fileModuleCandidates(e.specifier, e.name!, fmRow, fileModulesByName, perFileName, callKinds);
+          if (inFile.length === 1) add(e.source, inFile[0].id, "calls", "extracted");
+          continue;
+        }
+        if (local.length === 1) { add(e.source, local[0].id, "calls", "extracted"); continue; }
+        if (local.length > 1) continue;
+        const opened = fileImports.get(e.file);
+        const reachableHits = (globalName.get(e.name!) ?? []).filter((n) => callKinds.includes(n.kind) && opened?.has(n.path));
+        if (reachableHits.length === 1) add(e.source, reachableHits[0].id, "calls", "inferred");
+        continue;
+      }
       let hit = resolveName(e.name!, e.file, callKinds, perFileName, globalName);
       // Python is the Java case without the `new` to mark it: `Widget()` is an
       // ordinary call node, so a constructor edge dies against the function-only
@@ -566,14 +612,47 @@ function resolveJavaImport(spec: string, filesBySuffix: Map<string, string[]>): 
  * namespaced package's module — both stay the raw name rather than a guessed edge.
  */
 function resolveFileModule(spec: string, row: GenericLang, byName: Map<string, NodeV1[]>): string {
-  const hits = (byName.get(spec) ?? []).filter((n) => genericLangOf(n.path)?.name === row.name);
-  if (hits.length === 1) return hits[0].id;
-  for (const ext of row.exts) {
-    const withExt = hits.filter((n) => n.path.toLowerCase().endsWith(ext));
-    if (withExt.length === 1) return withExt[0].id;
-    if (withExt.length > 1) return spec; // ambiguous at the preferred extension — do not guess
+  // A dotted path (`Spring.Schema`, `Belt.Array`): the first segment that names a file
+  // wins — a namespaced package's `Spring` is no file but its `Schema` is. A first
+  // segment the pack declares external ends the search: `Belt.Array` is the standard
+  // library's Array, never a repo file called Array.
+  const segments = spec.split(".");
+  if (row.externalModules?.includes(segments[0])) return EXTERNAL;
+  for (const segment of segments) {
+    const hits = (byName.get(segment) ?? []).filter((n) => genericLangOf(n.path)?.name === row.name);
+    if (hits.length === 1) return hits[0].id;
+    for (const ext of row.exts) {
+      const withExt = hits.filter((n) => n.path.toLowerCase().endsWith(ext));
+      if (withExt.length === 1) return withExt[0].id;
+      if (withExt.length > 1) return spec; // ambiguous at the preferred extension — do not guess
+    }
   }
   return spec;
+}
+/** `resolveFileModule`'s answer for a module the pack declares external: not a file, not a
+ * dependency string either — a caller drops the edge outright. */
+const EXTERNAL = "\0external";
+
+/** The definitions named `name` in the first file along a dotted module path that has
+ * one: `Json.Encode.object` looks in Json.res, then — when Json.res is a facade with no
+ * `object` — in Encode.res. A file that HAS the name ends the walk even when ambiguous
+ * (two definitions there), so a later segment can never override the module actually
+ * named. */
+function fileModuleCandidates(
+  spec: string,
+  name: string,
+  row: GenericLang,
+  byName: Map<string, NodeV1[]>,
+  perFileName: Map<string, Map<string, NodeV1[]>>,
+  kinds: Kind[],
+): NodeV1[] {
+  for (const segment of spec.split(".")) {
+    const file = resolveFileModule(segment, row, byName);
+    if (file === EXTERNAL) return [];
+    const inFile = (perFileName.get(file)?.get(name) ?? []).filter((n) => kinds.includes(n.kind));
+    if (inFile.length > 0) return inFile;
+  }
+  return [];
 }
 
 /**
