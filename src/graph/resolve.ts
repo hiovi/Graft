@@ -212,7 +212,7 @@ export function resolveEdges(
     if (e.relation !== "imports" || !e.specifier) continue;
     const row = genericLangOf(e.file);
     if (!row?.fileModules) continue;
-    const target = resolveFileModule(e.specifier, row, fileModulesByName);
+    const target = resolveFileModule(e.specifier, row, fileModulesByName, e.file);
     if (!byId.has(target)) continue;
     if (!fileImports.has(e.file)) fileImports.set(e.file, new Set());
     fileImports.get(e.file)!.add(target);
@@ -233,7 +233,7 @@ export function resolveEdges(
       const fileModuleRow = genericLangOf(e.file);
       const target =
         fileModuleRow?.fileModules
-          ? resolveFileModule(e.specifier, fileModuleRow, fileModulesByName)
+          ? resolveFileModule(e.specifier, fileModuleRow, fileModulesByName, e.file)
           : hasGoModules && e.file.endsWith(".go")
           ? resolveGoImport(e.specifier, opts.goModules!, goFilesByDir)
           : e.file.endsWith(".java")
@@ -366,7 +366,7 @@ export function resolveEdges(
           // standard library, a dependency, a namespace, a name two files share — is
           // dropped too: falling back to the bare rule here is how `E.field` with
           // `module E = Matrix.Encode` (two Encode.res in the repo) landed on Parse.res.
-          const inFile = fileModuleCandidates(e.specifier, e.name!, fmRow, fileModulesByName, perFileName, callKinds);
+          const inFile = fileModuleCandidates(e.specifier, e.name!, fmRow, fileModulesByName, perFileName, callKinds, e.file);
           if (inFile.length === 1) add(e.source, inFile[0].id, "calls", "extracted");
           continue;
         }
@@ -611,23 +611,72 @@ function resolveJavaImport(spec: string, filesBySuffix: Map<string, string[]>): 
  * `App.res` per app) are ambiguous, and a name that is no file is a dependency or a
  * namespaced package's module — both stay the raw name rather than a guessed edge.
  */
-function resolveFileModule(spec: string, row: GenericLang, byName: Map<string, NodeV1[]>): string {
-  // A dotted path (`Spring.Schema`, `Belt.Array`): the first segment that names a file
-  // wins — a namespaced package's `Spring` is no file but its `Schema` is. A first
-  // segment the pack declares external ends the search: `Belt.Array` is the standard
-  // library's Array, never a repo file called Array.
+function resolveFileModule(spec: string, row: GenericLang, byName: Map<string, NodeV1[]>, fromFile?: string): string {
+  const files = filesAlongPath(spec, row, byName, fromFile);
+  if (files === EXTERNAL) return EXTERNAL;
+  return files[0] ?? spec;
+}
+
+/** Is `path` inside `dir` (repo-relative posix; "" is the root and holds everything)? */
+const under = (path: string, dir: string): boolean => dir === "" || path.startsWith(`${dir}/`);
+
+/** The namespace directory (deepest) a file belongs to, if the pack knows one. */
+function namespaceDirOf(path: string, row: GenericLang): string | undefined {
+  let best: string | undefined;
+  for (const dir of row.namespaceDirs?.values() ?? []) {
+    if (under(path, dir) && (best === undefined || dir.length > best.length)) best = dir;
+  }
+  return best;
+}
+
+/**
+ * The files a dotted module path names, in order — `Spring.Schema` → [Schema.res];
+ * `Foo.Bar` with both files in the repo → [Foo.res, Bar.res] — so an import takes the
+ * first and a call looks for its callee in the first that defines it. Three rules read
+ * the path the way the compiler does:
+ *   - a first segment the pack declares external ends the search (`Belt.Array` is the
+ *     standard library's Array, never a repo file called Array);
+ *   - a first segment that is a package namespace (`Matrix` in `Matrix.Encode`, from
+ *     the pack's manifests) is no file itself but scopes the rest of the path to that
+ *     package's directory, so two packages' `Encode.res` stop being one ambiguity;
+ *   - a segment several files share, none of them in scope, is resolved by the
+ *     importing file's own package when exactly one candidate lives there — a file
+ *     inside a namespaced package sees its siblings unqualified — and otherwise by the
+ *     pack's first-listed extension (the implementation beats its interface twin).
+ * A segment still ambiguous after that is passed over; a path that names no file
+ * yields [].
+ */
+function filesAlongPath(spec: string, row: GenericLang, byName: Map<string, NodeV1[]>, fromFile?: string): string[] | typeof EXTERNAL {
   const segments = spec.split(".");
   if (row.externalModules?.includes(segments[0])) return EXTERNAL;
-  for (const segment of segments) {
-    const hits = (byName.get(segment) ?? []).filter((n) => genericLangOf(n.path)?.name === row.name);
-    if (hits.length === 1) return hits[0].id;
-    for (const ext of row.exts) {
-      const withExt = hits.filter((n) => n.path.toLowerCase().endsWith(ext));
-      if (withExt.length === 1) return withExt[0].id;
-      if (withExt.length > 1) return spec; // ambiguous at the preferred extension — do not guess
+  let scope: string | undefined;
+  const home = fromFile ? namespaceDirOf(fromFile, row) : undefined;
+  const out: string[] = [];
+  segments.forEach((segment, i) => {
+    if (i === 0 && row.namespaceDirs?.has(segment)) {
+      scope = row.namespaceDirs.get(segment);
+      return;
     }
-  }
-  return spec;
+    let hits = (byName.get(segment) ?? []).filter((n) => genericLangOf(n.path)?.name === row.name);
+    if (scope !== undefined) hits = hits.filter((n) => under(n.path, scope!));
+    const pick = (cands: NodeV1[]): NodeV1 | undefined => {
+      if (cands.length === 1) return cands[0];
+      if (cands.length > 1 && home !== undefined && scope === undefined) {
+        const local = cands.filter((n) => under(n.path, home));
+        if (local.length === 1) return local[0];
+      }
+      return undefined;
+    };
+    let hit = pick(hits);
+    if (!hit && hits.length > 1) {
+      for (const ext of row.exts) {
+        const withExt = hits.filter((n) => n.path.toLowerCase().endsWith(ext));
+        if (withExt.length > 0) { hit = pick(withExt); break; } // ambiguous at the preferred extension — do not guess
+      }
+    }
+    if (hit) out.push(hit.id);
+  });
+  return out;
 }
 /** `resolveFileModule`'s answer for a module the pack declares external: not a file, not a
  * dependency string either — a caller drops the edge outright. */
@@ -645,10 +694,11 @@ function fileModuleCandidates(
   byName: Map<string, NodeV1[]>,
   perFileName: Map<string, Map<string, NodeV1[]>>,
   kinds: Kind[],
+  fromFile?: string,
 ): NodeV1[] {
-  for (const segment of spec.split(".")) {
-    const file = resolveFileModule(segment, row, byName);
-    if (file === EXTERNAL) return [];
+  const files = filesAlongPath(spec, row, byName, fromFile);
+  if (files === EXTERNAL) return [];
+  for (const file of files) {
     const inFile = (perFileName.get(file)?.get(name) ?? []).filter((n) => kinds.includes(n.kind));
     if (inFile.length > 0) return inFile;
   }

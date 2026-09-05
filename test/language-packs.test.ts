@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { loadLanguagePacks, packDirs, resetLanguagePacksForTest } from "../src/graph/packs.js";
+import { loadLanguagePacks, loadNamespaces, namespaceOfPackageName, packDirs, resetLanguagePacksForTest } from "../src/graph/packs.js";
 import { extractGeneric, genericLangOf, resetGenericLangsForTest, swapGrammarForTest, warmGenericGrammars } from "../src/graph/generic.js";
 import { resolveEdges } from "../src/graph/resolve.js";
 import { supportedExtensions, unsupportedExtensions } from "../src/graph/source-files.js";
@@ -246,4 +246,63 @@ test("fileModules: a qualified call resolves inside the named file; a bare cross
   ].sort());
   const imports = edges.filter((e) => e.relation === "imports").map((e) => `${e.source}→${e.target}`).sort();
   assert.deepEqual(imports, ["src/alias.moon→src/model.moon", "src/consumer.moon→src/model.moon", "src/consumer.moon→vendor", "src/loader.moon→src/model.moon", "src/opener.moon→src/model.moon"]);
+});
+
+// Package namespaces: a manifest's `namespace` (`true` → from `name`) prefixes every
+// module in that package. `AlphaLib.encode` then means the encode file under the
+// package declaring `AlphaLib`, a file inside a package sees its siblings unqualified,
+// and two packages' same-named files stop being one ambiguity.
+test("namespaceOfPackageName follows the compiler's rule", () => {
+  assert.equal(namespaceOfPackageName("rescript-json"), "RescriptJson");
+  assert.equal(namespaceOfPackageName("json"), "Json");
+  assert.equal(namespaceOfPackageName("Matrix"), "Matrix");
+  assert.equal(namespaceOfPackageName("@org/x-y"), "OrgXY");
+  assert.equal(namespaceOfPackageName("my_pkg"), "Mypkg");
+});
+
+test("fileModules + namespaces: a namespace scopes a path to its package; siblings resolve unqualified", async () => {
+  const { repo, home, langs } = repoAndHome();
+  const dir = writePack(langs, "moon", manifest("moon", ".moon", { fileModules: true, namespaces: "moon.json" }));
+  writeFileSync(join(dir, "tags.scm"), MOON_MODULE_TAGS + `
+(function_call name: (dot_index_expression table: (dot_index_expression) @module field: (identifier) @name)) @reference.call
+(function_call name: (dot_index_expression table: (dot_index_expression) @name)) @reference.module
+`);
+  loadLanguagePacks(repo, { home, warn: (m) => assert.fail(m) });
+  const files: Record<string, string> = {
+    "lib/alpha/moon.json": JSON.stringify({ name: "alpha-lib", namespace: true }),
+    "lib/alpha/src/encode.moon": "function object() return 1 end\n",
+    "lib/beta/moon.json": JSON.stringify({ namespace: "beta" }),
+    "lib/beta/src/encode.moon": "function object() return 2 end\n",
+    "lib/beta/src/sibling.moon": "function go() return encode.object() end\n", // unqualified, inside Beta
+    "src/user.moon": "function a() return AlphaLib.encode.object() end\nfunction b() return Beta.encode.object() end\nfunction c() return encode.object() end\n",
+  };
+  for (const [rel, src] of Object.entries(files)) {
+    mkdirSync(join(repo, rel, ".."), { recursive: true });
+    writeFileSync(join(repo, rel), src);
+  }
+  loadNamespaces(repo, Object.keys(files).map((rel) => join(repo, rel)));
+  assert.deepEqual([...genericLangOf("x.moon")!.namespaceDirs!.entries()].sort(), [["AlphaLib", "lib/alpha"], ["Beta", "lib/beta"]]);
+  await warmGenericGrammars(["moon"]);
+
+  const nodes = [], raw = [];
+  for (const [rel, src] of Object.entries(files)) {
+    if (!rel.endsWith(".moon")) continue;
+    const r = extractGeneric(rel, src, "moon");
+    nodes.push(...r.nodes); raw.push(...r.rawEdges);
+  }
+  const edges = resolveEdges(nodes, raw);
+  const calls = edges.filter((e) => e.relation === "calls").map((e) => `${e.source}→${e.target}:${e.confidence}`).sort();
+  assert.deepEqual(calls, [
+    "lib/beta/src/sibling.moon#go→lib/beta/src/encode.moon#object:extracted", // own package wins the tie
+    "src/user.moon#a→lib/alpha/src/encode.moon#object:extracted",
+    "src/user.moon#b→lib/beta/src/encode.moon#object:extracted",
+    // user.moon's unqualified `encode.object()`: two encode files, none in its package → dropped
+  ]);
+  const imports = edges.filter((e) => e.relation === "imports").map((e) => `${e.source}→${e.target}`).sort();
+  assert.deepEqual(imports, [
+    "lib/beta/src/sibling.moon→lib/beta/src/encode.moon",
+    "src/user.moon→encode", // the unqualified, unplaceable one stays a string
+    "src/user.moon→lib/alpha/src/encode.moon",
+    "src/user.moon→lib/beta/src/encode.moon",
+  ]);
 });

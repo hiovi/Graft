@@ -48,6 +48,13 @@ export interface GenericLang {
   /** With `fileModules`: module names that are never a file in any repo (a standard
    * library), skipped outright rather than left as unresolved import strings. */
   externalModules?: readonly string[];
+  /** With `fileModules`: manifest basenames (`rescript.json`) that declare a package
+   * namespace — a module prefix that is no file (`Matrix` in `Matrix.Encode`) but names
+   * the package directory whose files it qualifies. Set by a pack's `namespaces`. */
+  namespaceManifests?: readonly string[];
+  /** Namespace → package directory (repo-relative posix, "" for the root), filled by
+   * packs.ts `loadNamespaces` from the manifests above. */
+  namespaceDirs?: Map<string, string>;
 }
 
 /** The breadth registry. Add a row + a queries/<name>.scm to support a language.
@@ -76,6 +83,8 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
 // they can never shadow one, and a pack's extension collision is refused there.
 const packLangs: GenericLang[] = [];
 const allLangs = (): GenericLang[] => [...GENERIC_LANGS, ...packLangs];
+/** Built-in rows plus every pack row registered so far. */
+export const allGenericLangs = allLangs;
 
 const byExt = new Map<string, GenericLang>();
 for (const l of GENERIC_LANGS) for (const e of l.exts) byExt.set(e, l);
